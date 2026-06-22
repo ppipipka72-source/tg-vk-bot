@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Runtime data
+links.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# vkbottle runtime
+.vkbottle/
+
+# Logs
+*.log

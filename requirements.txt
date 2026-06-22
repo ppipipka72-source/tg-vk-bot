@@ -1,0 +1,6 @@
+aiogram>=3.7,<4
+vkbottle>=4.3,<5
+python-dotenv>=1.0
+Pillow>=10.0
+certifi>=2023.0
+yt-dlp>=2024.0
