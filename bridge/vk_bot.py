@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 
 from vkbottle.bot import Bot, Message
 
@@ -19,6 +20,7 @@ class VKSide:
         self.api = self.bot.api
         self.tg_bot = None  # выставляется в main
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main
+        self.discord = None  # DiscordSide, выставляется в main (если включён Discord)
         self._name_cache: dict[int, str] = {}
 
         self.bot.on.message()(self._on_message)
@@ -57,6 +59,11 @@ class VKSide:
         if message.from_id is None or message.from_id < 0:
             return
 
+        # Команда /vc — кто в голосовых Discord (вывод в оба чата). Не пересылаем.
+        if (message.text or "").strip().lower() == "/vc":
+            await self._handle_vc(message.peer_id, tg_chat_id)
+            return
+
         name = await self._resolve_name(message.from_id)
         try:
             await send_vk_message_to_tg(
@@ -74,6 +81,19 @@ class VKSide:
                 self.tg_bot, self.api, tg_chat_id, message.peer_id,
                 self.cfg.vk_token, self.cfg.vk_user_token, self.vk_group_id,
                 text, tg_anchor, vk_cmid))
+
+    async def _handle_vc(self, peer_id: int, tg_chat_id: int) -> None:
+        if self.discord is None or not self.discord.ready:
+            await self.api.messages.send(
+                peer_id=peer_id, message="Discord-бот не подключён.",
+                random_id=random.getrandbits(31))
+            return
+        count = await self.discord.handle_vc(tg_chat_id)
+        if count == 0:
+            await self.api.messages.send(
+                peer_id=peer_id,
+                message="К этому чату не привязан Discord-сервер (в Telegram: /ds_connect).",
+                random_id=random.getrandbits(31))
 
     async def start(self) -> None:
         log.info("VK polling запущен (пар: %d)", len(self.links.all_pairs()))

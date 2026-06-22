@@ -34,6 +34,13 @@ class LinkStore:
             "CREATE TABLE IF NOT EXISTS seen_vk ("
             "peer_id INTEGER PRIMARY KEY, title TEXT)"
         )
+        # Привязки Discord-сервер -> TG-чат (а VK берётся из пары pairs).
+        # Голосовые события сервера льются в этот TG-чат и его VK-беседу.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS ds_bindings ("
+            "guild_id INTEGER, tg_chat_id INTEGER, title TEXT, "
+            "PRIMARY KEY (guild_id, tg_chat_id))"
+        )
         self._db.commit()
         self._seen_cache: set[int] = set()
         self._trim_keep = trim_keep
@@ -144,3 +151,30 @@ class LinkStore:
         rows = self._db.execute(
             "SELECT peer_id, title FROM seen_vk ORDER BY rowid").fetchall()
         return [(p, t or "") for p, t in rows if p not in paired]
+
+    # --- привязки Discord-сервер <-> TG-чат --------------------------------
+
+    def add_ds_binding(self, guild_id: int, tg_chat_id: int, title: str = "") -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO ds_bindings(guild_id, tg_chat_id, title) "
+            "VALUES (?, ?, ?)", (guild_id, tg_chat_id, title))
+        self._db.commit()
+
+    def remove_ds_binding(self, guild_id: int, tg_chat_id: int) -> bool:
+        cur = self._db.execute(
+            "DELETE FROM ds_bindings WHERE guild_id=? AND tg_chat_id=?",
+            (guild_id, tg_chat_id))
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def ds_guilds_for_tg(self, tg_chat_id: int) -> list[tuple[int, str]]:
+        """Привязанные к TG-чату Discord-серверы: [(guild_id, title), ...]."""
+        return [(r[0], r[1] or "") for r in self._db.execute(
+            "SELECT guild_id, title FROM ds_bindings WHERE tg_chat_id=? ORDER BY rowid",
+            (tg_chat_id,)).fetchall()]
+
+    def ds_tg_chats_for_guild(self, guild_id: int) -> list[int]:
+        """TG-чаты, куда (и в их VK-беседы) слать события сервера."""
+        return [r[0] for r in self._db.execute(
+            "SELECT tg_chat_id FROM ds_bindings WHERE guild_id=?",
+            (guild_id,)).fetchall()]

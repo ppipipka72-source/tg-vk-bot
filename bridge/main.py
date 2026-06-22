@@ -47,12 +47,27 @@ async def run() -> None:
 
     tasks = [vk.start(), tg.start()]
 
-    # Discord-бот (опционально): отслеживание голосовых каналов + /vc.
+    # Discord-наблюдатель (опционально): голосовые каналы -> уведомления и /vc
+    # в привязанные пары моста (Telegram + VK). Управление в TG: /ds_connect.
     if cfg.discord_token:
         from .discord_bot import DiscordSide
-        discord_side = DiscordSide(cfg)
-        tasks.append(discord_side.start())
-        log.info("Discord-бот подключён")
+        discord_side = DiscordSide(cfg, links)
+        discord_side.tg_bot = tg.bot
+        discord_side.vk_api = vk.api
+        discord_side.vk_token = cfg.vk_token
+        tg.discord = discord_side
+        vk.discord = discord_side
+
+        async def _run_discord() -> None:
+            # Падение Discord (плохой токен, не включены интенты) не должно
+            # ронять мост TG<->VK.
+            try:
+                await discord_side.start()
+            except Exception:
+                log.exception("Discord-наблюдатель остановился — мост работает дальше")
+
+        tasks.append(_run_discord())
+        log.info("Discord-наблюдатель подключён")
 
     logging.getLogger(__name__).info("Мост VK <-> Telegram запускается...")
     await asyncio.gather(*tasks)

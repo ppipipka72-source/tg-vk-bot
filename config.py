@@ -41,9 +41,9 @@ class Config:
     vk_peer_id: int = 0
     # --- Discord (опционально) ---
     # Если discord_token пуст — Discord-бот не запускается, мост работает как обычно.
+    # Команды управления (/ds_connect) и вывод (/vc, уведомления) идут через мост
+    # (Telegram + VK), а не внутри Discord.
     discord_token: str = ""
-    discord_guild_id: int = 0          # для мгновенной регистрации slash-команд
-    discord_notify_channel_id: int = 0  # текстовый канал для уведомлений о войсах
 
 
 def load_config() -> Config:
@@ -57,6 +57,4 @@ def load_config() -> Config:
         tg_chat_id=int(os.getenv("TG_CHAT_ID") or 0),
         vk_peer_id=int(os.getenv("VK_PEER_ID") or 0),
         discord_token=os.getenv("DISCORD_TOKEN", ""),
-        discord_guild_id=int(os.getenv("DISCORD_GUILD_ID") or 0),
-        discord_notify_channel_id=int(os.getenv("DISCORD_NOTIFY_CHANNEL_ID") or 0),
     )

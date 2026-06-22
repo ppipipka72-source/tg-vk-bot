@@ -28,13 +28,20 @@ class TGSide:
         self.dp = Dispatcher()
         self.vk_api = None  # выставляется в main
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main
+        self.discord = None  # DiscordSide, выставляется в main (если включён Discord)
 
         # Команды управления (только владельцы) — регистрируем ДО общего хендлера.
         self.dp.message(Command("link"))(self._cmd_link)
         self.dp.message(Command("unlink"))(self._cmd_unlink)
         self.dp.message(Command(commands=["status", "pairs"]))(self._cmd_status)
         self.dp.message(Command(commands=["help", "start"]))(self._cmd_help)
+        # Discord-фича: /vc — всем, привязки — только владельцам.
+        self.dp.message(Command(commands=["vc"]))(self._cmd_vc)
+        self.dp.message(Command(commands=["ds_connect"]))(self._cmd_ds_connect)
+        self.dp.message(Command(commands=["ds_disconnect"]))(self._cmd_ds_disconnect)
         self.dp.callback_query(F.data.startswith("link:"))(self._on_link_cb)
+        self.dp.callback_query(F.data.startswith("dsc:"))(self._on_ds_connect_cb)
+        self.dp.callback_query(F.data.startswith("dsd:"))(self._on_ds_disconnect_cb)
         self.dp.edited_message()(self._on_edited_message)
         self.dp.message()(self._on_message)
 
@@ -66,7 +73,11 @@ class TGSide:
             "Я связываю чаты TG ↔ VK. Команды (только для владельца):\n"
             "• /link — связать <b>этот</b> чат с беседой VK (покажу кнопки выбора)\n"
             "• /unlink — отвязать этот чат\n"
-            "• /status — список всех связанных пар",
+            "• /status — список всех связанных пар\n"
+            "\n<b>Discord (голосовые):</b>\n"
+            "• /ds_connect — привязать Discord-сервер к этому чату\n"
+            "• /ds_disconnect — отвязать Discord-сервер\n"
+            "• /vc — кто сейчас в голосовых (картинка; доступно всем, в TG и VK)",
             parse_mode="HTML",
         )
 
@@ -141,6 +152,91 @@ class TGSide:
             lines.append(f"• TG <code>{tg_chat_id}</code>{mark} ↔ "
                          f"VK «{title}» <code>{vk_peer_id}</code>")
         await message.reply("\n".join(lines), parse_mode="HTML")
+
+    # --- Discord: голосовые каналы ------------------------------------------
+
+    async def _cmd_vc(self, message: Message) -> None:
+        if self.discord is None:
+            await message.reply("Discord-бот не подключён.")
+            return
+        if not self.discord.ready:
+            await message.reply("Discord-бот ещё подключается, попробуй через "
+                                "несколько секунд.")
+            return
+        count = await self.discord.handle_vc(message.chat.id)
+        if count == 0:
+            await message.reply("К этому чату не привязан Discord-сервер. "
+                                "Владелец: /ds_connect.")
+
+    async def _cmd_ds_connect(self, message: Message) -> None:
+        if not self._is_admin(message.from_user.id if message.from_user else None):
+            return
+        if message.chat.type not in _GROUP_TYPES:
+            await message.reply("Эту команду нужно писать в групповом чате, "
+                                "который привязываешь.")
+            return
+        if self.discord is None or not self.discord.ready:
+            await message.reply("Discord-бот не подключён (или ещё подключается).")
+            return
+        bound = {gid for gid, _ in self.links.ds_guilds_for_tg(message.chat.id)}
+        options = [(gid, name) for gid, name in self.discord.list_guilds()
+                   if gid not in bound]
+        if not options:
+            await message.reply("Нет доступных Discord-серверов для привязки "
+                                "(бот не на серверах, либо все уже привязаны к "
+                                "этому чату).")
+            return
+        rows = [[InlineKeyboardButton(text=name[:60], callback_data=f"dsc:{gid}")]
+                for gid, name in options[:20]]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await message.reply(
+            "Выбери Discord-сервер, чьи голосовые слать в <b>этот</b> чат "
+            "(и его VK-беседу):", reply_markup=kb, parse_mode="HTML")
+
+    async def _on_ds_connect_cb(self, cb: CallbackQuery) -> None:
+        if not self._is_admin(cb.from_user.id if cb.from_user else None):
+            await cb.answer("Только для владельца бота.", show_alert=True)
+            return
+        try:
+            guild_id = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Некорректные данные.", show_alert=True)
+            return
+        name = (self.discord.guild_name(guild_id) if self.discord else None) or str(guild_id)
+        self.links.add_ds_binding(guild_id, cb.message.chat.id, name)
+        log.info("DS-привязка: сервер %s (%s) -> TG %s",
+                 guild_id, name, cb.message.chat.id)
+        await cb.message.edit_text(
+            f"✅ Привязан Discord-сервер «{name}». События голосовых идут в этот "
+            f"чат и в VK. /vc — полный список.")
+        await cb.answer("Готово")
+
+    async def _cmd_ds_disconnect(self, message: Message) -> None:
+        if not self._is_admin(message.from_user.id if message.from_user else None):
+            return
+        bound = self.links.ds_guilds_for_tg(message.chat.id)
+        if not bound:
+            await message.reply("К этому чату не привязан ни один Discord-сервер.")
+            return
+        rows = [[InlineKeyboardButton(text=(name or str(gid))[:60],
+                                      callback_data=f"dsd:{gid}")]
+                for gid, name in bound]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await message.reply("Выбери Discord-сервер для отвязки от этого чата:",
+                            reply_markup=kb)
+
+    async def _on_ds_disconnect_cb(self, cb: CallbackQuery) -> None:
+        if not self._is_admin(cb.from_user.id if cb.from_user else None):
+            await cb.answer("Только для владельца бота.", show_alert=True)
+            return
+        try:
+            guild_id = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Некорректные данные.", show_alert=True)
+            return
+        self.links.remove_ds_binding(guild_id, cb.message.chat.id)
+        await cb.message.edit_text("✅ Discord-сервер отвязан от этого чата.")
+        await cb.answer("Готово")
 
     # --- обычные сообщения --------------------------------------------------
 
