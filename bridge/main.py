@@ -45,8 +45,17 @@ async def run() -> None:
     if cfg.vk_user_token:
         log.info("User-токен подключён: видео будет нативным")
 
+    tasks = [vk.start(), tg.start()]
+
+    # Discord-бот (опционально): отслеживание голосовых каналов + /vc.
+    if cfg.discord_token:
+        from .discord_bot import DiscordSide
+        discord_side = DiscordSide(cfg)
+        tasks.append(discord_side.start())
+        log.info("Discord-бот подключён")
+
     logging.getLogger(__name__).info("Мост VK <-> Telegram запускается...")
-    await asyncio.gather(vk.start(), tg.start())
+    await asyncio.gather(*tasks)
 
 
 def main() -> None:
