@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 
 MAX_BYTES = 50 * 1024 * 1024  # 50 МБ — лимит загрузки файла ботом в Telegram
 
+# Корень проекта — чтобы искать cookies-файл независимо от рабочей директории.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Имена cookies-файлов, которые подхватываем автоматически (Instagram и пр.
+# требуют авторизации). Достаточно положить такой файл в папку проекта.
+_DEFAULT_COOKIE_FILES = ("cookies.txt", "ig_cookies.txt")
+
 # Любой http(s)-URL в тексте.
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
@@ -77,8 +83,15 @@ def _ydl_opts(outdir: str) -> dict:
         # Иногда обходит YouTube-проверку "подтвердите, что вы не бот".
         "extractor_args": {"youtube": {"player_client": ["tv", "web_safari", "default"]}},
     }
-    # Куки для площадок, требующих авторизации (в первую очередь YouTube).
+    # Куки для площадок, требующих авторизации (Instagram, YouTube и пр.).
+    # Приоритет: явный путь в YTDLP_COOKIES -> cookies.txt в папке проекта.
     cookiefile = os.getenv("YTDLP_COOKIES", "").strip()
+    if not cookiefile:
+        for name in _DEFAULT_COOKIE_FILES:
+            cand = os.path.join(_PROJECT_ROOT, name)
+            if os.path.exists(cand):
+                cookiefile = cand
+                break
     if cookiefile:
         opts["cookiefile"] = cookiefile
     browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()

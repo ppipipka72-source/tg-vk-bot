@@ -1,5 +1,9 @@
 # Secrets
 .env
+# Cookies для yt-dlp (содержат сессию аккаунта — нельзя в git)
+cookies.txt
+ig_cookies.txt
+cookies*.txt
 
 # Runtime data
 links.db
