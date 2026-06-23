@@ -356,23 +356,21 @@ async def _send_vk_video(tg_bot, vk_user_token, chat_id, v):
             return await tg_bot.send_video(
                 chat_id, BufferedInputFile(data, filename="video.mp4"), caption=f"🎬 {title}")
 
-    # 2) Фолбэк: превью-кадр + рабочая ссылка (с access_key для приватных).
+    # Фолбэк без mp4. Превью VK через send_photo не шлём: для приватных/внешних
+    # это либо заглушка-замок ("Доступ ограничен"), либо Telegram вообще не может
+    # скачать URL — в обоих случаях получается мусор. Шлём чистой строкой.
     link = f"https://vk.com/video{v.owner_id}_{v.id}"
     access_key = getattr(v, "access_key", None)
     if access_key:
         link += f"?access_key={access_key}"
-    caption = f"🎬 {title}\n{link}"
 
-    # Превью грузим через send_photo по URL VK. Telegram качает URL сам и для
-    # внешних/недоступных видео не может его достать ("failed to get HTTP URL
-    # content") — тогда откатываемся на текст со ссылкой, чтобы не терять видео.
-    thumb = _max_size_url(getattr(v, "image", None))
-    if thumb:
-        try:
-            return await tg_bot.send_photo(chat_id, thumb, caption=caption)
-        except Exception:  # noqa: BLE001
-            log.warning("VK->TG: не удалось отправить превью видео, шлю ссылкой")
-    return await tg_bot.send_message(chat_id, caption)
+    # 2) Автор ограничил доступ — mp4 недоступен нашему аккаунту (но не другим).
+    if getattr(v, "content_restricted", None) or getattr(v, "is_private", None):
+        note = getattr(v, "content_restricted_message", None) or "автор ограничил доступ к видео"
+        return await tg_bot.send_message(chat_id, f"🎬🔒 {note}\n{link}")
+
+    # 3) Внешнее/непереносимое видео — отдаём рабочей ссылкой.
+    return await tg_bot.send_message(chat_id, f"🎬 {title}\n{link}")
 
 
 # --------------------------------------------------------------------------- #
