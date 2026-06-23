@@ -41,6 +41,14 @@ class LinkStore:
             "guild_id INTEGER, tg_chat_id INTEGER, title TEXT, "
             "PRIMARY KEY (guild_id, tg_chat_id))"
         )
+        # Участники TG-чатов (для @all): Bot API не умеет перечислять всех
+        # участников, поэтому копим тех, кто писал в чат.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS chat_members ("
+            "tg_chat_id INTEGER, user_id INTEGER, "
+            "username TEXT, full_name TEXT, "
+            "PRIMARY KEY (tg_chat_id, user_id))"
+        )
         self._db.commit()
         self._seen_cache: set[int] = set()
         self._trim_keep = trim_keep
@@ -178,3 +186,31 @@ class LinkStore:
         return [r[0] for r in self._db.execute(
             "SELECT tg_chat_id FROM ds_bindings WHERE guild_id=?",
             (guild_id,)).fetchall()]
+
+    # --- участники TG-чатов (для @all) --------------------------------------
+
+    def track_member(self, tg_chat_id: int, user_id: int,
+                     username: str | None, full_name: str | None) -> None:
+        """Запомнить (или обновить) участника, написавшего в чат."""
+        if not (tg_chat_id and user_id):
+            return
+        self._db.execute(
+            "INSERT INTO chat_members(tg_chat_id, user_id, username, full_name) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(tg_chat_id, user_id) DO UPDATE SET "
+            "username=excluded.username, full_name=excluded.full_name",
+            (tg_chat_id, user_id, username, full_name))
+        self._db.commit()
+
+    def chat_members(self, tg_chat_id: int) -> list[tuple[int, str, str]]:
+        """Накопленные участники чата: [(user_id, username, full_name), ...]."""
+        return [(r[0], r[1] or "", r[2] or "") for r in self._db.execute(
+            "SELECT user_id, username, full_name FROM chat_members "
+            "WHERE tg_chat_id=? ORDER BY rowid", (tg_chat_id,)).fetchall()]
+
+    def forget_member(self, tg_chat_id: int, user_id: int) -> None:
+        """Забыть участника (например, ушёл из чата)."""
+        self._db.execute(
+            "DELETE FROM chat_members WHERE tg_chat_id=? AND user_id=?",
+            (tg_chat_id, user_id))
+        self._db.commit()

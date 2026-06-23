@@ -1,5 +1,7 @@
 import asyncio
+import html
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -18,6 +20,11 @@ from .video_dl import find_video_url
 log = logging.getLogger(__name__)
 
 _GROUP_TYPES = ("group", "supergroup")
+
+# @all как отдельное слово (не часть e-mail/ника): @all, @All, @ALL.
+_ALL_RE = re.compile(r"(?<![\w@])@all\b", re.IGNORECASE)
+# Сколько упоминаний класть в одно сообщение (лимит TG ~4096 симв. и entities).
+_MENTIONS_PER_MSG = 30
 
 
 class TGSide:
@@ -77,7 +84,10 @@ class TGSide:
             "\n<b>Discord (голосовые):</b>\n"
             "• /ds_connect — привязать Discord-сервер к этому чату\n"
             "• /ds_disconnect — отвязать Discord-сервер\n"
-            "• /vc — кто сейчас в голосовых (картинка; доступно всем, в TG и VK)",
+            "• /vc — кто сейчас в голосовых (картинка; доступно всем, в TG и VK)\n"
+            "\n<b>Прочее:</b>\n"
+            "• <code>@all</code> в сообщении — тегну всех участников чата "
+            "(кого видел писавшими). В VK не дублируется.",
             parse_mode="HTML",
         )
 
@@ -244,9 +254,31 @@ class TGSide:
         vk_peer_id = self.links.vk_peer_for_tg_chat(message.chat.id)
         if vk_peer_id is None:
             return  # чат не связан — игнорируем
+
+        # Служебные сообщения о входе/выходе — поддерживаем список участников.
+        for u in (message.new_chat_members or []):
+            if not u.is_bot:
+                self.links.track_member(message.chat.id, u.id,
+                                        u.username, u.full_name)
+        if message.left_chat_member and not message.left_chat_member.is_bot:
+            self.links.forget_member(message.chat.id, message.left_chat_member.id)
+
         # Игнорируем ботов (в т.ч. эхо нашего бота) и служебные сообщения.
         if message.from_user is None or message.from_user.is_bot:
             return
+
+        # Копим участников чата для @all (Bot API не умеет перечислять всех).
+        self.links.track_member(message.chat.id, message.from_user.id,
+                                message.from_user.username,
+                                message.from_user.full_name)
+
+        # @all — тегаем всех известных участников ОТДЕЛЬНЫМ сообщением бота.
+        # Оно не попадает в VK: бот не получает свои же апдейты, а ниже мы
+        # его и не релеим. Само сообщение пользователя с «@all» уходит в VK
+        # как обычно.
+        text_all = message.text or message.caption or ""
+        if _ALL_RE.search(text_all):
+            asyncio.create_task(self._tag_everyone(message))
 
         name = message.from_user.full_name
         try:
@@ -264,6 +296,34 @@ class TGSide:
                 self.bot, self.vk_api, message.chat.id, vk_peer_id,
                 self.cfg.vk_token, self.cfg.vk_user_token, self.vk_group_id,
                 text, message.message_id, vk_anchor))
+
+    async def _tag_everyone(self, message: Message) -> None:
+        """Ответить на @all упоминаниями всех накопленных участников чата."""
+        author_id = message.from_user.id if message.from_user else None
+        mentions: list[str] = []
+        for user_id, username, full_name in self.links.chat_members(message.chat.id):
+            if user_id == author_id:
+                continue  # автора @all не дёргаем
+            if username:
+                mentions.append(f"@{username}")
+            else:
+                label = html.escape(full_name or "user")
+                mentions.append(f'<a href="tg://user?id={user_id}">{label}</a>')
+
+        if not mentions:
+            await message.reply("Пока некого тегать: я ещё не видел сообщений "
+                                "других участников этого чата.")
+            return
+
+        for i in range(0, len(mentions), _MENTIONS_PER_MSG):
+            chunk = " ".join(mentions[i:i + _MENTIONS_PER_MSG])
+            try:
+                await self.bot.send_message(
+                    message.chat.id, chunk, parse_mode="HTML",
+                    reply_to_message_id=message.message_id if i == 0 else None,
+                    disable_notification=False)
+            except Exception:  # noqa: BLE001
+                log.exception("@all: не удалось отправить упоминания")
 
     async def _on_edited_message(self, message: Message) -> None:
         vk_peer_id = self.links.vk_peer_for_tg_chat(message.chat.id)
