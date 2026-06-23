@@ -6,11 +6,14 @@ getUploadServer -> POST файла на upload_url -> save.
 """
 
 import json
+import logging
 
 import aiohttp
 
 API = "https://api.vk.com/method/"
 API_VERSION = "5.199"
+
+log = logging.getLogger(__name__)
 
 
 async def _method(session: aiohttp.ClientSession, token: str, name: str, params: dict) -> dict:
@@ -48,15 +51,20 @@ async def _post_file(session, upload_url, field, data, filename, content_type):
     if not text or not text.strip():
         raise RuntimeError(f"upload-сервер вернул пусто ({diag})")
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
     except json.JSONDecodeError:
         raise RuntimeError(f"upload-сервер вернул не JSON ({diag}): {text[:200]!r}")
+    log.debug("VK upload (%s): %s -> %s", field, diag, text[:300])
+    return parsed
 
 
 async def upload_photo(token: str, peer_id: int, data: bytes) -> str:
     async with aiohttp.ClientSession() as s:
         server = await _method(s, token, "photos.getMessagesUploadServer", {"peer_id": peer_id})
         up = await _post_file(s, server["upload_url"], "photo", data, "photo.png", "image/png")
+        if not up.get("photo"):
+            raise RuntimeError(
+                f"VK не принял фото (size={len(data)}b, ответ upload-сервера: {up})")
         saved = await _method(s, token, "photos.saveMessagesPhoto", {
             "photo": up["photo"], "server": up["server"], "hash": up["hash"],
         })
@@ -70,6 +78,10 @@ async def upload_doc(token: str, peer_id: int, filename: str, data: bytes) -> st
                                {"type": "doc", "peer_id": peer_id})
         up = await _post_file(s, server["upload_url"], "file", data, filename,
                               "application/octet-stream")
+        if not up.get("file"):
+            raise RuntimeError(
+                f"VK не принял документ '{filename}' (size={len(data)}b, "
+                f"ответ upload-сервера: {up})")
         saved = await _method(s, token, "docs.save", {"file": up["file"], "title": filename})
     obj = saved.get("doc") or saved
     return f"doc{obj['owner_id']}_{obj['id']}"
@@ -80,6 +92,9 @@ async def upload_voice(token: str, peer_id: int, data: bytes) -> str:
         server = await _method(s, token, "docs.getMessagesUploadServer",
                                {"type": "audio_message", "peer_id": peer_id})
         up = await _post_file(s, server["upload_url"], "file", data, "voice.ogg", "audio/ogg")
+        if not up.get("file"):
+            raise RuntimeError(
+                f"VK не принял голосовое (size={len(data)}b, ответ upload-сервера: {up})")
         saved = await _method(s, token, "docs.save", {"file": up["file"]})
     am = saved.get("audio_message")
     if am:
