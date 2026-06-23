@@ -5,6 +5,7 @@ VK -> Telegram: вложения отдаются Telegram прямыми ссы
 Каждое вложение обрабатывается изолированно: ошибка одного не роняет остальные.
 """
 
+import html
 import io
 import json
 import logging
@@ -235,15 +236,56 @@ async def send_vk_message_to_tg(tg_bot, vk_user_token, chat_id, name, message,
     if sent:
         links.link(chat_id, sent.message_id, message.peer_id, vk_cmid)
 
-    for att in (message.attachments or []):
+    await _send_vk_attachments(tg_bot, vk_user_token, chat_id,
+                               message.attachments, message.peer_id, vk_cmid, links)
+
+    # Пересланные пачки сообщений (fwd_messages) — их текст и вложения лежат
+    # вложенно и в attachments не попадают; разворачиваем рекурсивно.
+    if message.fwd_messages:
+        await _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id,
+                                    message.fwd_messages, message.peer_id, vk_cmid, links)
+
+
+async def _send_vk_attachments(tg_bot, vk_user_token, chat_id, attachments,
+                               peer_id, vk_cmid, links: LinkStore) -> None:
+    """Переносит список VK-вложений в TG; ошибка одного не роняет остальные."""
+    for att in (attachments or []):
         try:
             sent_att = await _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att)
             # Линкуем и медиа: ответить в TG можно хоть на фото/видео.
             if sent_att:
-                links.link(chat_id, sent_att.message_id, message.peer_id, vk_cmid)
+                links.link(chat_id, sent_att.message_id, peer_id, vk_cmid)
         except Exception:  # noqa: BLE001
             log.exception("VK->TG: не удалось перенести вложение")
             await tg_bot.send_message(chat_id, "⚠️ вложение не удалось перенести")
+
+
+async def _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id, fwd_messages,
+                                peer_id, vk_cmid, links: LinkStore, depth: int = 1) -> None:
+    """Рекурсивно переносит пересланные сообщения VK (fwd_messages) в TG.
+
+    Каждое пересланное — отдельным TG-сообщением с маркером пересылки; его
+    вложения и вложенные пересылки разворачиваются следом.
+    """
+    marker = "↪️" + "▸" * (depth - 1)
+    for fwd in fwd_messages or []:
+        text = (getattr(fwd, "text", None) or "").strip()
+        block = f"<i>{marker} переслано:</i>"
+        if text:
+            block += f"\n{html.escape(text)}"
+        sent = await _tg_send(tg_bot, "send_message", chat_id, None,
+                              block, parse_mode=ParseMode.HTML)
+        if sent:
+            links.link(chat_id, sent.message_id, peer_id, vk_cmid)
+
+        await _send_vk_attachments(tg_bot, vk_user_token, chat_id,
+                                   getattr(fwd, "attachments", None),
+                                   peer_id, vk_cmid, links)
+
+        nested = getattr(fwd, "fwd_messages", None)
+        if nested:
+            await _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id, nested,
+                                        peer_id, vk_cmid, links, depth + 1)
 
 
 async def _tg_send(tg_bot, method_name, chat_id, reply_to, *args, **kwargs):
@@ -321,9 +363,15 @@ async def _send_vk_video(tg_bot, vk_user_token, chat_id, v):
         link += f"?access_key={access_key}"
     caption = f"🎬 {title}\n{link}"
 
+    # Превью грузим через send_photo по URL VK. Telegram качает URL сам и для
+    # внешних/недоступных видео не может его достать ("failed to get HTTP URL
+    # content") — тогда откатываемся на текст со ссылкой, чтобы не терять видео.
     thumb = _max_size_url(getattr(v, "image", None))
     if thumb:
-        return await tg_bot.send_photo(chat_id, thumb, caption=caption)
+        try:
+            return await tg_bot.send_photo(chat_id, thumb, caption=caption)
+        except Exception:  # noqa: BLE001
+            log.warning("VK->TG: не удалось отправить превью видео, шлю ссылкой")
     return await tg_bot.send_message(chat_id, caption)
 
 
