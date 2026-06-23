@@ -251,7 +251,8 @@ async def _send_vk_attachments(tg_bot, vk_user_token, chat_id, attachments,
     """Переносит список VK-вложений в TG; ошибка одного не роняет остальные."""
     for att in (attachments or []):
         try:
-            sent_att = await _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att)
+            sent_att = await _send_one_vk_attachment(
+                tg_bot, vk_user_token, chat_id, att, peer_id, vk_cmid)
             # Линкуем и медиа: ответить в TG можно хоть на фото/видео.
             if sent_att:
                 links.link(chat_id, sent_att.message_id, peer_id, vk_cmid)
@@ -302,7 +303,7 @@ async def _tg_send(tg_bot, method_name, chat_id, reply_to, *args, **kwargs):
     return await method(chat_id, *args, **kwargs)
 
 
-async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att):
+async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att, peer_id=None, cmid=None):
     """Отправляет одно вложение и возвращает отправленное TG-сообщение (для reply-связи)."""
     if att.photo:
         url = _max_size_url(att.photo.sizes)
@@ -313,7 +314,7 @@ async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att):
         return await tg_bot.send_photo(chat_id, url) if url else None
 
     if att.video:
-        return await _send_vk_video(tg_bot, vk_user_token, chat_id, att.video)
+        return await _send_vk_video(tg_bot, vk_user_token, chat_id, att.video, peer_id, cmid)
 
     if att.doc:
         ext = (att.doc.ext or "").lower()
@@ -345,13 +346,14 @@ async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att):
     return await tg_bot.send_message(chat_id, "📎 [вложение не поддерживается]")
 
 
-async def _send_vk_video(tg_bot, vk_user_token, chat_id, v):
+async def _send_vk_video(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=None):
     title = v.title or "видео"
 
     # 1) С user-токеном тянем mp4 через video.get и шлём настоящим видео.
     if vk_user_token:
         data = await download_vk_video(
-            vk_user_token, v.owner_id, v.id, getattr(v, "access_key", None))
+            vk_user_token, v.owner_id, v.id, getattr(v, "access_key", None),
+            peer_id=peer_id, cmid=cmid)
         if data:
             return await tg_bot.send_video(
                 chat_id, BufferedInputFile(data, filename="video.mp4"), caption=f"🎬 {title}")
