@@ -117,9 +117,12 @@ async def download_vk_video(user_token, owner_id, video_id, access_key,
         data = await _try_download(s, user_token, owner_id, video_id, access_key)
         if data is not None:
             return data
+        log.info("video.get retry?: peer_id=%s cmid=%s owner=%s vid=%s",
+                 peer_id, cmid, owner_id, video_id)
         if peer_id and cmid:
             fresh = await _resolve_user_access_key(s, user_token, peer_id, cmid,
                                                    owner_id, video_id)
+            log.info("video.get resolved key: %s (было %s)", fresh, access_key)
             if fresh and fresh != access_key:
                 log.info("video.get: повтор с user-scoped access_key для %s_%s",
                          owner_id, video_id)
