@@ -355,8 +355,12 @@ async def _send_vk_video(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=N
             vk_user_token, v.owner_id, v.id, getattr(v, "access_key", None),
             peer_id=peer_id, cmid=cmid)
         if data:
+            # Без caption: у видео, залитых прямо в беседу VK, "title" — это
+            # авто-мусор (случайные символы / "видео недоступно"). Реальный текст
+            # пользователя и так уходит отдельным header-сообщением, так что
+            # подпись тут только засоряет сообщение.
             return await tg_bot.send_video(
-                chat_id, BufferedInputFile(data, filename="video.mp4"), caption=f"🎬 {title}")
+                chat_id, BufferedInputFile(data, filename="video.mp4"))
 
     # Фолбэк без mp4. Превью VK через send_photo не шлём: для приватных/внешних
     # это либо заглушка-замок ("Доступ ограничен"), либо Telegram вообще не может
