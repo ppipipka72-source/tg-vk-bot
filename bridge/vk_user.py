@@ -73,37 +73,56 @@ async def _try_download(session, user_token, owner_id, video_id, access_key) -> 
     return None
 
 
+def _find_video_key(messages, owner_id, video_id) -> str | None:
+    """Рекурсивно (attachments/fwd_messages/reply) ищет access_key видео."""
+    for m in messages or []:
+        for a in (m.get("attachments") or []):
+            v = a.get("video")
+            if v and v.get("owner_id") == owner_id and v.get("id") == video_id:
+                return v.get("access_key")
+        if key := _find_video_key(m.get("fwd_messages"), owner_id, video_id):
+            return key
+        rm = m.get("reply_message")
+        if rm and (key := _find_video_key([rm], owner_id, video_id)):
+            return key
+    return None
+
+
 async def _resolve_user_access_key(session, user_token, peer_id, cmid,
                                    owner_id, video_id) -> str | None:
     """Взять access_key видео, выданный под ПОЛЬЗОВАТЕЛЬСКИЙ токен.
 
-    Сообщение приходит через групповой лонгполл, и access_key во вложении привязан
-    к community-токену — video.get под user-токеном его не принимает (VK отвечает
-    content_restricted, как для приватных видео, залитых прямо в беседу).
-    Перечитываем то же сообщение user-токеном и берём его access_key.
+    Сообщение приходит через community-токен, и access_key во вложении привязан к
+    нему — video.get под user-токеном его не принимает (VK отвечает как для
+    приватного видео). Перечитываем то же сообщение user-токеном.
+
+    ВАЖНО: peer_id у community-токена ЛОКАЛЬНЫЙ (нумерация бесед своя) и не
+    совпадает с тем, что видит user-токен. Поэтому пробуем переданный peer_id, а
+    если пусто — ищем ту же беседу среди диалогов user-токена по cmid + видео.
     """
+    async def lookup(peer) -> str | None:
+        try:
+            resp = await _method(session, user_token, "messages.getByConversationMessageId",
+                                 {"peer_id": peer, "conversation_message_ids": cmid})
+        except Exception:  # noqa: BLE001
+            return None
+        return _find_video_key(resp.get("items"), owner_id, video_id)
+
+    if peer_id and (key := await lookup(peer_id)):
+        return key
+
     try:
-        resp = await _method(session, user_token, "messages.getByConversationMessageId",
-                             {"peer_id": peer_id, "conversation_message_ids": cmid})
+        convs = await _method(session, user_token, "messages.getConversations", {"count": 200})
     except Exception:  # noqa: BLE001
-        log.exception("messages.getByConversationMessageId не удался")
+        log.exception("messages.getConversations не удался")
         return None
-
-    def find(messages):
-        for m in messages or []:
-            for a in (m.get("attachments") or []):
-                v = a.get("video")
-                if v and v.get("owner_id") == owner_id and v.get("id") == video_id:
-                    return v.get("access_key")
-            key = find(m.get("fwd_messages"))
-            if key:
-                return key
-            rm = m.get("reply_message")
-            if rm and (key := find([rm])):
-                return key
-        return None
-
-    return find(resp.get("items"))
+    for c in convs.get("items", []):
+        peer = (c.get("conversation") or {}).get("peer", {}).get("id")
+        if not peer or peer < 2000000000 or peer == peer_id:
+            continue  # только беседы; переданный peer уже пробовали
+        if key := await lookup(peer):
+            return key
+    return None
 
 
 async def download_vk_video(user_token, owner_id, video_id, access_key,
@@ -117,16 +136,16 @@ async def download_vk_video(user_token, owner_id, video_id, access_key,
         data = await _try_download(s, user_token, owner_id, video_id, access_key)
         if data is not None:
             return data
-        log.info("video.get retry?: peer_id=%s cmid=%s owner=%s vid=%s",
-                 peer_id, cmid, owner_id, video_id)
-        if peer_id and cmid:
+        if cmid:
             fresh = await _resolve_user_access_key(s, user_token, peer_id, cmid,
                                                    owner_id, video_id)
-            log.info("video.get resolved key: %s (было %s)", fresh, access_key)
             if fresh and fresh != access_key:
                 log.info("video.get: повтор с user-scoped access_key для %s_%s",
                          owner_id, video_id)
                 return await _try_download(s, user_token, owner_id, video_id, fresh)
+            else:
+                log.info("video.get: user-scoped ключ не найден для %s_%s (видео реально недоступно?)",
+                         owner_id, video_id)
     return None
 
 
