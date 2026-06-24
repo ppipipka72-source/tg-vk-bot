@@ -366,7 +366,7 @@ class TGSide:
                 f"сохранить.", parse_mode="HTML")
             return
         try:
-            ok = await self.alts.send_to_tg(chat_id, alt)
+            ok = await self.alts.send_both(alt)
         except Exception:  # noqa: BLE001
             log.exception("alt: ошибка выдачи «%s»", name)
             ok = False
@@ -384,7 +384,7 @@ class TGSide:
             await cb.answer("Этот альт уже удалён.", show_alert=True)
             return
         try:
-            ok = await self.alts.send_to_tg(cb.message.chat.id, row)
+            ok = await self.alts.send_both(row)
         except Exception:  # noqa: BLE001
             log.exception("alt: не удалось отправить видео «%s»", row["name"])
             ok = False

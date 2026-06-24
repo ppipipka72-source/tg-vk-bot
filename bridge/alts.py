@@ -10,6 +10,7 @@
 перекладки байтов после первого раза.
 """
 
+import asyncio
 import logging
 import random
 
@@ -126,6 +127,31 @@ class AltService:
         return True, None
 
     # --- выдача --------------------------------------------------------------
+
+    async def send_both(self, alt) -> bool:
+        """Отправить альт сразу в TG-чат И в парную VK-беседу.
+
+        Видео шлёт бот, а свои сообщения он не получает обратно, поэтому мост их
+        не дублирует — рассылаем в обе стороны сами, чтобы запрос на одной
+        платформе был виден и на другой. Стороны идут параллельно (ленивая
+        конвертация одной не тормозит мгновенную выдачу на другой)."""
+        tg_chat_id = alt["tg_chat_id"]
+        vk_peer_id = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
+
+        jobs = []
+        if tg_chat_id:
+            jobs.append(("TG", self.send_to_tg(tg_chat_id, alt)))
+        if vk_peer_id:
+            jobs.append(("VK", self.send_to_vk(vk_peer_id, alt)))
+
+        results = await asyncio.gather(*(c for _, c in jobs), return_exceptions=True)
+        ok = False
+        for (side, _), res in zip(jobs, results):
+            if isinstance(res, Exception):
+                log.error("alt: выдача в %s не удалась", side, exc_info=res)
+            elif res:
+                ok = True
+        return ok
 
     async def send_to_tg(self, chat_id, alt) -> bool:
         """Отправить альт в TG-чат. Лениво конвертирует VK→TG и кеширует."""

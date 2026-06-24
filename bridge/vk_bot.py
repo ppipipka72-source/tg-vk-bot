@@ -209,8 +209,10 @@ class VKSide:
         await self._vk_send(message.peer_id, f"⚠️ {reason}.")
 
     async def _deliver_alt(self, peer_id: int, alt) -> None:
+        # send_both шлёт и в эту беседу, и в парный TG-чат, чтобы запрос был
+        # виден на обеих платформах.
         try:
-            ok = await self.alts.send_to_vk(peer_id, alt)
+            ok = await self.alts.send_both(alt)
         except Exception:  # noqa: BLE001
             log.exception("alt VK: ошибка выдачи «%s»", alt["name"])
             ok = False
