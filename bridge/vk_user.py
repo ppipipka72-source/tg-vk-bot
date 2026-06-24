@@ -125,13 +125,7 @@ async def _resolve_user_video(session, user_token, peer_id, cmid,
                                  {"peer_id": peer, "conversation_message_ids": cmid})
         except Exception:  # noqa: BLE001
             return None
-        v = _find_video(resp.get("items"), owner_id, video_id)
-        if v is not None:
-            # [DEBUG кружки] полный объект видео из messages — есть ли тут files/player?
-            import json
-            log.info("DEBUG msg-video raw (peer=%s): %s", peer,
-                     json.dumps(v, ensure_ascii=False, default=str))
-        return v
+        return _find_video(resp.get("items"), owner_id, video_id)
 
     if peer_id and (v := await lookup(peer_id)):
         return v

@@ -1,5 +1,7 @@
 # Secrets
 .env
+# Захваченные запросы магазина LoL (содержат токены/сессию) — не в git
+lol_shop_requests.json
 # Cookies для yt-dlp (содержат сессию аккаунта — нельзя в git)
 cookies.txt
 ig_cookies.txt
