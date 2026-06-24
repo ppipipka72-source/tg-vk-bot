@@ -20,7 +20,7 @@ from .formatting import format_for_tg, format_for_vk
 from .state import LinkStore
 from .video_dl import download_video, find_video_url
 from .vk_upload import upload_doc, upload_photo, upload_voice
-from .vk_user import download_vk_video, upload_vk_video
+from .vk_user import download_vk_video, resolve_message_link, upload_vk_video
 
 log = logging.getLogger(__name__)
 
@@ -314,6 +314,10 @@ async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att, peer_id=N
         return await tg_bot.send_photo(chat_id, url) if url else None
 
     if att.video:
+        # Кружок (video_message): сам файл VK по API не отдаёт (приватное видео,
+        # вшитое в беседу) — шлём ссылку на сообщение, откроется своей сессией.
+        if getattr(att.video, "type", None) == "video_message":
+            return await _send_vk_circle(tg_bot, vk_user_token, chat_id, att.video, peer_id, cmid)
         return await _send_vk_video(tg_bot, vk_user_token, chat_id, att.video, peer_id, cmid)
 
     if att.doc:
@@ -344,6 +348,25 @@ async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att, peer_id=N
         return await tg_bot.send_message(chat_id, att.link.url)
 
     return await tg_bot.send_message(chat_id, "📎 [вложение не поддерживается]")
+
+
+async def _send_vk_circle(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=None):
+    """Кружок (VK video_message). Файл недоступен через API — шлём ссылку на
+    сообщение в беседе (vk.com/im), чтобы открыть его своей VK-сессией."""
+    # Автор: VK-title кружка обычно "Видеосообщение от @user".
+    title = v.title or ""
+    author = title.split("от ", 1)[1].strip() if "от " in title else ""
+    text = f"🔴 Кружок от {author}".rstrip() if author else "🔴 Кружок"
+
+    link = None
+    if vk_user_token and cmid:
+        try:
+            link = await resolve_message_link(vk_user_token, peer_id, cmid, v.owner_id, v.id)
+        except Exception:  # noqa: BLE001
+            log.exception("VK->TG: не смог построить ссылку на кружок")
+    if link:
+        text += f"\n{link}"
+    return await tg_bot.send_message(chat_id, text)
 
 
 async def _send_vk_video(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=None):

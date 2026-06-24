@@ -144,6 +144,47 @@ async def _resolve_user_video(session, user_token, peer_id, cmid,
     return None
 
 
+async def resolve_message_link(user_token, peer_id, cmid, owner_id, video_id) -> str | None:
+    """Ссылка на сообщение с видео в беседе (vk.com/im) под user-токеном.
+
+    Нужна для кружков (video_message): сам файл VK по API не отдаёт, поэтому
+    шлём в TG ссылку на сообщение — каждый откроет его своей VK-сессией.
+
+    Как и с access_key, peer_id из community-лонгполла локальный, а ссылка
+    должна вести в беседу глазами обычного участника. Поэтому ищем то же
+    сообщение среди диалогов user-токена и берём его user-side peer_id + id.
+    """
+    async with _session() as s:
+        async def lookup(peer):
+            try:
+                resp = await _method(s, user_token, "messages.getByConversationMessageId",
+                                     {"peer_id": peer, "conversation_message_ids": cmid})
+            except Exception:  # noqa: BLE001
+                return None
+            for m in resp.get("items") or []:
+                if _find_video([m], owner_id, video_id):
+                    return m.get("id"), m.get("peer_id")
+            return None
+
+        found = await lookup(peer_id) if peer_id else None
+        if not found:
+            try:
+                convs = await _method(s, user_token, "messages.getConversations", {"count": 200})
+            except Exception:  # noqa: BLE001
+                convs = {}
+            for c in convs.get("items", []):
+                peer = (c.get("conversation") or {}).get("peer", {}).get("id")
+                if not peer or peer < 2000000000 or peer == peer_id:
+                    continue
+                if found := await lookup(peer):
+                    break
+        if not found:
+            return None
+        msg_id, mpeer = found
+        sel = f"c{mpeer - 2000000000}" if mpeer >= 2000000000 else str(mpeer)
+        return f"https://vk.com/im?sel={sel}&msgid={msg_id}"
+
+
 async def download_vk_video(user_token, owner_id, video_id, access_key,
                             peer_id=None, cmid=None) -> bytes | None:
     """Скачать лучший mp4 в пределах лимита Telegram. None — если не вышло.
