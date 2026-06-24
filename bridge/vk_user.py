@@ -163,19 +163,20 @@ async def download_vk_video(user_token, owner_id, video_id, access_key,
                 log.info("video.get: user-scoped ключ не найден для %s_%s (видео реально недоступно?)",
                          owner_id, video_id)
 
-        # Кружок (video_message) ещё транскодируется (processing=1, files пусты) —
-        # VK не отдаёт mp4 сразу. Ждём и опрашиваем video.get с бэкоффом.
-        if item is not None and item.get("processing") and not item.get("content_restricted"):
-            for delay in (2, 3, 5, 8, 12):
+        # Кружок (video_message) ещё транскодируется — VK отдаёт объект без files
+        # (флаг processing ненадёжен: бывает и 1, и None). Если видео нам доступно
+        # (не content_restricted), но mp4 ещё нет — ждём и опрашиваем с бэкоффом.
+        if item is not None and not item.get("content_restricted"):
+            for delay in (2, 3, 5, 8, 12, 15):
                 await asyncio.sleep(delay)
                 data, item = await _try_download(s, user_token, owner_id, video_id, key)
                 if data is not None:
                     log.info("video.get: %s_%s готово после ожидания транскодинга",
                              owner_id, video_id)
                     return data
-                if item is None or not item.get("processing"):
+                if item is None or item.get("content_restricted"):
                     break
-            log.info("video.get: %s_%s так и не дотранскодировалось за отведённое время",
+            log.info("video.get: %s_%s так и не отдало mp4 за отведённое время",
                      owner_id, video_id)
     return None
 
