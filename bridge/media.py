@@ -9,6 +9,7 @@ import html
 import io
 import json
 import logging
+import os
 import random
 
 from aiogram import Bot as TgBot
@@ -43,8 +44,29 @@ async def _download_tg(bot: TgBot, file_id: str) -> bytes:
     """
     file = await bot.get_file(file_id, request_timeout=_TG_FILE_TIMEOUT)
     buf = io.BytesIO()
-    await bot.download_file(file.file_path, destination=buf, timeout=_TG_FILE_TIMEOUT)
+    try:
+        await bot.download_file(file.file_path, destination=buf, timeout=_TG_FILE_TIMEOUT)
+    finally:
+        _cleanup_local_file(bot, file.file_path)
     return buf.getvalue()
+
+
+def _cleanup_local_file(bot: TgBot, file_path: str | None) -> None:
+    """Удалить файл, скачанный локальным Bot API сервером.
+
+    В режиме --local getFile выкачивает файл на диск сервера и сам его НЕ
+    чистит — иначе диск быстро забивается крупными видео. Мы уже прочитали
+    файл в память, так что после этого удаляем его с диска. В облачном режиме
+    файла на нашем диске нет — пропускаем.
+    """
+    if not file_path:
+        return
+    if not getattr(getattr(bot.session, "api", None), "is_local", False):
+        return
+    try:
+        os.remove(file_path)
+    except OSError:
+        log.debug("Не удалось удалить локальный файл %s", file_path, exc_info=True)
 
 
 def _to_png(data: bytes) -> bytes:
