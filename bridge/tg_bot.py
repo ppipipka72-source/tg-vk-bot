@@ -36,8 +36,11 @@ class TGSide:
         # Локальный Bot API сервер (если задан) снимает лимит 20 МБ на скачивание
         # и 50 МБ на отправку — нужен для переноса крупных видео. Иначе облачный.
         if cfg.tg_api_url:
+            # timeout=600: крупные видео (скачивание getFile и заливка send_video
+            # через локальный сервер) не укладываются в дефолтные ~60 с.
             session = AiohttpSession(
-                api=TelegramAPIServer.from_base(cfg.tg_api_url, is_local=cfg.tg_api_local)
+                api=TelegramAPIServer.from_base(cfg.tg_api_url, is_local=cfg.tg_api_local),
+                timeout=600,
             )
             self.bot = Bot(token=cfg.tg_token, session=session)
             log.info("Telegram Bot API: локальный сервер %s (local=%s)",

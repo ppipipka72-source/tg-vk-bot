@@ -24,6 +24,11 @@ from .vk_user import download_vk_video, resolve_message_link, upload_vk_video
 
 log = logging.getLogger(__name__)
 
+# Таймаут на скачивание файла у Telegram. У локального Bot API сервера getFile
+# сначала целиком тянет файл с серверов Telegram и только потом отвечает — для
+# крупных видео (сотни МБ) это занимает минуты, поэтому дефолтных ~60 с мало.
+_TG_FILE_TIMEOUT = 600
+
 
 def _random_id() -> int:
     return random.getrandbits(31)
@@ -33,10 +38,12 @@ async def _download_tg(bot: TgBot, file_id: str) -> bytes:
     """Скачать файл Telegram в память.
 
     Лимит скачивания у облачного Bot API — 20 МБ; с локальным Bot API сервером
-    (TG_API_URL) он поднимается до 2 ГБ, так что крупные видео переносятся.
+    (TG_API_URL) он поднимается до ~2 ГБ, так что крупные видео переносятся.
+    getFile и скачивание идут с увеличенным таймаутом (см. _TG_FILE_TIMEOUT).
     """
+    file = await bot.get_file(file_id, request_timeout=_TG_FILE_TIMEOUT)
     buf = io.BytesIO()
-    await bot.download(file_id, destination=buf)
+    await bot.download_file(file.file_path, destination=buf, timeout=_TG_FILE_TIMEOUT)
     return buf.getvalue()
 
 
