@@ -5,6 +5,7 @@ TG→VK: video.save -> заливаем файл -> прикрепляем video
 ID сообщества (group_id) определяется автоматически из community-токена.
 """
 
+import asyncio
 import logging
 import ssl
 
@@ -42,35 +43,43 @@ async def detect_group_id(community_token: str) -> int | None:
     return None
 
 
-async def _try_download(session, user_token, owner_id, video_id, access_key) -> bytes | None:
-    """Одна попытка: video.get -> качаем лучший mp4 в пределах лимита TG."""
+async def _try_download(session, user_token, owner_id, video_id, access_key):
+    """Одна попытка: video.get -> качаем лучший mp4 в пределах лимита TG.
+
+    Возвращает (data, item): data — байты mp4 или None; item — сырой объект
+    видео из video.get (или None, если items нет/ошибка), чтобы вызывающий мог
+    посмотреть на content_restricted / processing и решить, ждать ли.
+    """
     videos = f"{owner_id}_{video_id}" + (f"_{access_key}" if access_key else "")
     try:
         resp = await _method(session, user_token, "video.get", {"videos": videos})
         items = resp.get("items") or []
         if not items:
             log.info("video.get: видео %s недоступно (нет items)", videos)
-            return None
-        files = items[0].get("files") or {}
+            return None, None
+        item = items[0]
+        files = item.get("files") or {}
         mp4 = sorted(
             ((int(k.split("_")[1]), url) for k, url in files.items()
              if k.startswith("mp4_") and url),
             reverse=True,
         )
         if not mp4:
-            log.info("video.get: для %s нет mp4 (ключи: %s, restricted=%s)",
-                     videos, list(files.keys()), items[0].get("content_restricted"))
-            return None
+            log.info("video.get: для %s нет mp4 (ключи: %s, restricted=%s, processing=%s)",
+                     videos, list(files.keys()), item.get("content_restricted"),
+                     item.get("processing"))
+            return None, item
         for _, url in mp4:
             async with session.get(url) as vr:
                 if vr.content_length and vr.content_length > TG_UPLOAD_LIMIT:
                     continue
                 data = await vr.read()
             if len(data) <= TG_UPLOAD_LIMIT:
-                return data
+                return data, item
+        return None, item
     except Exception:  # noqa: BLE001
         log.exception("VK video.get: не удалось скачать видео")
-    return None
+    return None, None
 
 
 def _find_video_key(messages, owner_id, video_id) -> str | None:
@@ -133,19 +142,41 @@ async def download_vk_video(user_token, owner_id, video_id, access_key,
     под user-токен — иначе приватные видео из бесед не качаются (групповой ключ).
     """
     async with _session() as s:
-        data = await _try_download(s, user_token, owner_id, video_id, access_key)
+        key = access_key
+        data, item = await _try_download(s, user_token, owner_id, video_id, key)
         if data is not None:
             return data
-        if cmid:
+
+        # Ограничено для группового ключа -> перечитываем access_key под user-токен.
+        restricted = item is not None and item.get("content_restricted")
+        if (item is None or restricted) and cmid:
             fresh = await _resolve_user_access_key(s, user_token, peer_id, cmid,
                                                    owner_id, video_id)
-            if fresh and fresh != access_key:
+            if fresh and fresh != key:
                 log.info("video.get: повтор с user-scoped access_key для %s_%s",
                          owner_id, video_id)
-                return await _try_download(s, user_token, owner_id, video_id, fresh)
+                key = fresh
+                data, item = await _try_download(s, user_token, owner_id, video_id, key)
+                if data is not None:
+                    return data
             else:
                 log.info("video.get: user-scoped ключ не найден для %s_%s (видео реально недоступно?)",
                          owner_id, video_id)
+
+        # Кружок (video_message) ещё транскодируется (processing=1, files пусты) —
+        # VK не отдаёт mp4 сразу. Ждём и опрашиваем video.get с бэкоффом.
+        if item is not None and item.get("processing") and not item.get("content_restricted"):
+            for delay in (2, 3, 5, 8, 12):
+                await asyncio.sleep(delay)
+                data, item = await _try_download(s, user_token, owner_id, video_id, key)
+                if data is not None:
+                    log.info("video.get: %s_%s готово после ожидания транскодинга",
+                             owner_id, video_id)
+                    return data
+                if item is None or not item.get("processing"):
+                    break
+            log.info("video.get: %s_%s так и не дотранскодировалось за отведённое время",
+                     owner_id, video_id)
     return None
 
 

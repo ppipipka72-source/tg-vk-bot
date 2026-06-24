@@ -349,14 +349,6 @@ async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att, peer_id=N
 async def _send_vk_video(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=None):
     title = v.title or "видео"
 
-    # [DEBUG кружки] разовый дамп сырого объекта видео — понять, где лежит mp4
-    # у video message (video.get отдаёт files={}). Убрать после разбора.
-    try:
-        dump = v.model_dump() if hasattr(v, "model_dump") else v.dict()
-        log.info("DEBUG vk-video raw: %s", json.dumps(dump, ensure_ascii=False, default=str))
-    except Exception:  # noqa: BLE001
-        log.exception("DEBUG vk-video: не смог сериализовать объект")
-
     # 1) С user-токеном тянем mp4 через video.get и шлём настоящим видео.
     if vk_user_token:
         data = await download_vk_video(
