@@ -30,7 +30,11 @@ def _random_id() -> int:
 
 
 async def _download_tg(bot: TgBot, file_id: str) -> bytes:
-    """Скачать файл Telegram в память. Лимит Bot API на скачивание — 20 МБ."""
+    """Скачать файл Telegram в память.
+
+    Лимит скачивания у облачного Bot API — 20 МБ; с локальным Bot API сервером
+    (TG_API_URL) он поднимается до 2 ГБ, так что крупные видео переносятся.
+    """
     buf = io.BytesIO()
     await bot.download(file_id, destination=buf)
     return buf.getvalue()

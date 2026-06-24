@@ -4,6 +4,8 @@ import logging
 import re
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -31,7 +33,17 @@ class TGSide:
     def __init__(self, cfg: Config, links: LinkStore):
         self.cfg = cfg
         self.links = links
-        self.bot = Bot(token=cfg.tg_token)
+        # Локальный Bot API сервер (если задан) снимает лимит 20 МБ на скачивание
+        # и 50 МБ на отправку — нужен для переноса крупных видео. Иначе облачный.
+        if cfg.tg_api_url:
+            session = AiohttpSession(
+                api=TelegramAPIServer.from_base(cfg.tg_api_url, is_local=cfg.tg_api_local)
+            )
+            self.bot = Bot(token=cfg.tg_token, session=session)
+            log.info("Telegram Bot API: локальный сервер %s (local=%s)",
+                     cfg.tg_api_url, cfg.tg_api_local)
+        else:
+            self.bot = Bot(token=cfg.tg_token)
         self.dp = Dispatcher()
         self.vk_api = None  # выставляется в main
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main

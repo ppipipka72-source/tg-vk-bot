@@ -36,6 +36,12 @@ class Config:
     vk_user_token: str  # опционально: для нативного видео (video.get/video.save)
     log_level: str
     admin_ids: tuple[int, ...]  # TG user id владельцев — кто управляет парами
+    # Локальный Telegram Bot API сервер (для видео >20 МБ). Пусто -> облачный
+    # api.telegram.org (лимит скачивания 20 МБ, отправки 50 МБ). С локальным
+    # сервером лимиты поднимаются до 2 ГБ. tg_api_local=True — сервер запущен
+    # с флагом --local (getFile отдаёт локальные пути, файл читается с диска).
+    tg_api_url: str = ""
+    tg_api_local: bool = False
     # Необязательная начальная пара (для совместимости/первого запуска):
     tg_chat_id: int = 0
     vk_peer_id: int = 0
@@ -54,6 +60,9 @@ def load_config() -> Config:
         vk_user_token=os.getenv("VK_USER_TOKEN", ""),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         admin_ids=_parse_admins(os.getenv("TG_ADMINS", "")),
+        tg_api_url=os.getenv("TG_API_URL", "").strip(),
+        tg_api_local=(os.getenv("TG_API_LOCAL", "") or "").strip().lower()
+        in ("1", "true", "yes", "on"),
         tg_chat_id=int(os.getenv("TG_CHAT_ID") or 0),
         vk_peer_id=int(os.getenv("VK_PEER_ID") or 0),
         discord_token=os.getenv("DISCORD_TOKEN", ""),
