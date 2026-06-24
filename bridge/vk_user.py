@@ -5,7 +5,6 @@ TG→VK: video.save -> заливаем файл -> прикрепляем video
 ID сообщества (group_id) определяется автоматически из community-токена.
 """
 
-import asyncio
 import logging
 import ssl
 
@@ -43,6 +42,23 @@ async def detect_group_id(community_token: str) -> int | None:
     return None
 
 
+async def _download_best_mp4(session, files: dict) -> bytes | None:
+    """Из словаря files видео (mp4_240/480/...) качает лучший mp4 в лимите TG."""
+    mp4 = sorted(
+        ((int(k.split("_")[1]), url) for k, url in (files or {}).items()
+         if k.startswith("mp4_") and url),
+        reverse=True,
+    )
+    for _, url in mp4:
+        async with session.get(url) as vr:
+            if vr.content_length and vr.content_length > TG_UPLOAD_LIMIT:
+                continue
+            data = await vr.read()
+        if len(data) <= TG_UPLOAD_LIMIT:
+            return data
+    return None
+
+
 async def _try_download(session, user_token, owner_id, video_id, access_key):
     """Одна попытка: video.get -> качаем лучший mp4 в пределах лимита TG.
 
@@ -59,66 +75,66 @@ async def _try_download(session, user_token, owner_id, video_id, access_key):
             return None, None
         item = items[0]
         files = item.get("files") or {}
-        mp4 = sorted(
-            ((int(k.split("_")[1]), url) for k, url in files.items()
-             if k.startswith("mp4_") and url),
-            reverse=True,
-        )
-        if not mp4:
+        data = await _download_best_mp4(session, files)
+        if data is None:
             log.info("video.get: для %s нет mp4 (ключи: %s, restricted=%s, processing=%s)",
                      videos, list(files.keys()), item.get("content_restricted"),
                      item.get("processing"))
-            return None, item
-        for _, url in mp4:
-            async with session.get(url) as vr:
-                if vr.content_length and vr.content_length > TG_UPLOAD_LIMIT:
-                    continue
-                data = await vr.read()
-            if len(data) <= TG_UPLOAD_LIMIT:
-                return data, item
-        return None, item
+        return data, item
     except Exception:  # noqa: BLE001
         log.exception("VK video.get: не удалось скачать видео")
     return None, None
 
 
-def _find_video_key(messages, owner_id, video_id) -> str | None:
-    """Рекурсивно (attachments/fwd_messages/reply) ищет access_key видео."""
+def _find_video(messages, owner_id, video_id) -> dict | None:
+    """Рекурсивно (attachments/fwd_messages/reply) ищет объект видео."""
     for m in messages or []:
         for a in (m.get("attachments") or []):
             v = a.get("video")
             if v and v.get("owner_id") == owner_id and v.get("id") == video_id:
-                return v.get("access_key")
-        if key := _find_video_key(m.get("fwd_messages"), owner_id, video_id):
-            return key
+                return v
+        if v := _find_video(m.get("fwd_messages"), owner_id, video_id):
+            return v
         rm = m.get("reply_message")
-        if rm and (key := _find_video_key([rm], owner_id, video_id)):
-            return key
+        if rm and (v := _find_video([rm], owner_id, video_id)):
+            return v
     return None
 
 
-async def _resolve_user_access_key(session, user_token, peer_id, cmid,
-                                   owner_id, video_id) -> str | None:
-    """Взять access_key видео, выданный под ПОЛЬЗОВАТЕЛЬСКИЙ токен.
+def _find_video_key(messages, owner_id, video_id) -> str | None:
+    v = _find_video(messages, owner_id, video_id)
+    return v.get("access_key") if v else None
+
+
+async def _resolve_user_video(session, user_token, peer_id, cmid,
+                              owner_id, video_id) -> dict | None:
+    """Перечитать видео ПОЛЬЗОВАТЕЛЬСКИМ токеном и вернуть полный объект.
 
     Сообщение приходит через community-токен, и access_key во вложении привязан к
     нему — video.get под user-токеном его не принимает (VK отвечает как для
-    приватного видео). Перечитываем то же сообщение user-токеном.
+    приватного видео). Перечитываем то же сообщение user-токеном; заодно
+    messages-версия объекта богаче лонгполльной (response_type=min).
 
     ВАЖНО: peer_id у community-токена ЛОКАЛЬНЫЙ (нумерация бесед своя) и не
     совпадает с тем, что видит user-токен. Поэтому пробуем переданный peer_id, а
     если пусто — ищем ту же беседу среди диалогов user-токена по cmid + видео.
     """
-    async def lookup(peer) -> str | None:
+    async def lookup(peer) -> dict | None:
         try:
             resp = await _method(session, user_token, "messages.getByConversationMessageId",
                                  {"peer_id": peer, "conversation_message_ids": cmid})
         except Exception:  # noqa: BLE001
             return None
-        return _find_video_key(resp.get("items"), owner_id, video_id)
+        v = _find_video(resp.get("items"), owner_id, video_id)
+        if v is not None:
+            # [DEBUG кружки] полный объект видео из messages — есть ли тут files/player?
+            import json
+            log.info("DEBUG msg-video raw (peer=%s): %s", peer,
+                     json.dumps(v, ensure_ascii=False, default=str))
+        return v
 
-    if peer_id and (key := await lookup(peer_id)):
-        return key
+    if peer_id and (v := await lookup(peer_id)):
+        return v
 
     try:
         convs = await _method(session, user_token, "messages.getConversations", {"count": 200})
@@ -129,8 +145,8 @@ async def _resolve_user_access_key(session, user_token, peer_id, cmid,
         peer = (c.get("conversation") or {}).get("peer", {}).get("id")
         if not peer or peer < 2000000000 or peer == peer_id:
             continue  # только беседы; переданный peer уже пробовали
-        if key := await lookup(peer):
-            return key
+        if v := await lookup(peer):
+            return v
     return None
 
 
@@ -147,37 +163,30 @@ async def download_vk_video(user_token, owner_id, video_id, access_key,
         if data is not None:
             return data
 
-        # Ограничено для группового ключа -> перечитываем access_key под user-токен.
-        restricted = item is not None and item.get("content_restricted")
-        if (item is None or restricted) and cmid:
-            fresh = await _resolve_user_access_key(s, user_token, peer_id, cmid,
-                                                   owner_id, video_id)
-            if fresh and fresh != key:
-                log.info("video.get: повтор с user-scoped access_key для %s_%s",
-                         owner_id, video_id)
-                key = fresh
-                data, item = await _try_download(s, user_token, owner_id, video_id, key)
-                if data is not None:
-                    return data
-            else:
-                log.info("video.get: user-scoped ключ не найден для %s_%s (видео реально недоступно?)",
-                         owner_id, video_id)
+        if not cmid:
+            return None
 
-        # Кружок (video_message) ещё транскодируется — VK отдаёт объект без files
-        # (флаг processing ненадёжен: бывает и 1, и None). Если видео нам доступно
-        # (не content_restricted), но mp4 ещё нет — ждём и опрашиваем с бэкоффом.
-        if item is not None and not item.get("content_restricted"):
-            for delay in (2, 3, 5, 8, 12, 15):
-                await asyncio.sleep(delay)
-                data, item = await _try_download(s, user_token, owner_id, video_id, key)
-                if data is not None:
-                    log.info("video.get: %s_%s готово после ожидания транскодинга",
-                             owner_id, video_id)
-                    return data
-                if item is None or item.get("content_restricted"):
-                    break
-            log.info("video.get: %s_%s так и не отдало mp4 за отведённое время",
+        # Перечитываем видео user-токеном (полный объект; заодно user-scoped key).
+        v = await _resolve_user_video(s, user_token, peer_id, cmid, owner_id, video_id)
+        if v is None:
+            log.info("video.get: %s_%s не найдено user-токеном (реально недоступно?)",
                      owner_id, video_id)
+            return None
+
+        # 1) mp4 прямо в объекте из messages (кружки отдают files именно так).
+        data = await _download_best_mp4(s, v.get("files") or {})
+        if data is not None:
+            log.info("video.get: %s_%s взято из messages-объекта", owner_id, video_id)
+            return data
+
+        # 2) Повтор video.get с user-scoped access_key (приватные видео в беседе).
+        fresh = v.get("access_key")
+        if fresh and fresh != key:
+            log.info("video.get: повтор с user-scoped access_key для %s_%s",
+                     owner_id, video_id)
+            data, _ = await _try_download(s, user_token, owner_id, video_id, fresh)
+            if data is not None:
+                return data
     return None
 
 
