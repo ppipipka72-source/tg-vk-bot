@@ -13,7 +13,7 @@ import random
 
 from aiogram import Bot as TgBot
 from aiogram.enums import ParseMode
-from aiogram.types import BufferedInputFile, ReplyParameters
+from aiogram.types import BufferedInputFile, LinkPreviewOptions, ReplyParameters
 from PIL import Image
 
 from .formatting import format_for_tg, format_for_vk
@@ -252,7 +252,7 @@ async def _send_vk_attachments(tg_bot, vk_user_token, chat_id, attachments,
     for att in (attachments or []):
         try:
             sent_att = await _send_one_vk_attachment(
-                tg_bot, vk_user_token, chat_id, att, peer_id, vk_cmid)
+                tg_bot, vk_user_token, chat_id, att, peer_id, vk_cmid, links)
             # Линкуем и медиа: ответить в TG можно хоть на фото/видео.
             if sent_att:
                 links.link(chat_id, sent_att.message_id, peer_id, vk_cmid)
@@ -303,51 +303,99 @@ async def _tg_send(tg_bot, method_name, chat_id, reply_to, *args, **kwargs):
     return await method(chat_id, *args, **kwargs)
 
 
-async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att, peer_id=None, cmid=None):
-    """Отправляет одно вложение и возвращает отправленное TG-сообщение (для reply-связи)."""
-    if att.photo:
-        url = _max_size_url(att.photo.sizes)
+async def _send_one_vk_attachment(tg_bot, vk_user_token, chat_id, att,
+                                  peer_id=None, cmid=None, links=None):
+    """Отправляет одно вложение и возвращает отправленное TG-сообщение (для reply-связи).
+
+    Поля берём через getattr: модели вложений сообщения и вложений поста (wall)
+    различаются (у поста нет sticker/audio_message/wall и т.п.).
+    """
+    photo = getattr(att, "photo", None)
+    if photo:
+        url = _max_size_url(photo.sizes)
         return await tg_bot.send_photo(chat_id, url) if url else None
 
-    if att.sticker:
-        url = _max_size_url(att.sticker.images)
+    sticker = getattr(att, "sticker", None)
+    if sticker:
+        url = _max_size_url(sticker.images)
         return await tg_bot.send_photo(chat_id, url) if url else None
 
-    if att.video:
+    video = getattr(att, "video", None)
+    if video:
         # Кружок (video_message): сам файл VK по API не отдаёт (приватное видео,
         # вшитое в беседу) — шлём ссылку на сообщение, откроется своей сессией.
-        if getattr(att.video, "type", None) == "video_message":
-            return await _send_vk_circle(tg_bot, vk_user_token, chat_id, att.video, peer_id, cmid)
-        return await _send_vk_video(tg_bot, vk_user_token, chat_id, att.video, peer_id, cmid)
+        if getattr(video, "type", None) == "video_message":
+            return await _send_vk_circle(tg_bot, vk_user_token, chat_id, video, peer_id, cmid)
+        return await _send_vk_video(tg_bot, vk_user_token, chat_id, video, peer_id, cmid)
 
-    if att.doc:
-        ext = (att.doc.ext or "").lower()
-        if ext == "gif" and att.doc.url:
-            return await tg_bot.send_animation(chat_id, att.doc.url)
-        if att.doc.url:
-            return await tg_bot.send_document(chat_id, att.doc.url)
+    doc = getattr(att, "doc", None)
+    if doc:
+        ext = (doc.ext or "").lower()
+        if ext == "gif" and doc.url:
+            return await tg_bot.send_animation(chat_id, doc.url)
+        if doc.url:
+            return await tg_bot.send_document(chat_id, doc.url)
         return None
 
-    if att.audio_message:
-        url = att.audio_message.link_ogg or att.audio_message.link_mp3
+    audio_message = getattr(att, "audio_message", None)
+    if audio_message:
+        url = audio_message.link_ogg or audio_message.link_mp3
         return await tg_bot.send_voice(chat_id, url) if url else None
 
-    if att.graffiti:
-        return await tg_bot.send_photo(chat_id, att.graffiti.url) if att.graffiti.url else None
+    graffiti = getattr(att, "graffiti", None)
+    if graffiti:
+        return await tg_bot.send_photo(chat_id, graffiti.url) if graffiti.url else None
 
-    if att.audio:
-        a = att.audio
-        return await tg_bot.send_message(chat_id, f"🎵 {a.artist or ''} — {a.title or ''}".strip())
-
-    if att.wall:
-        w = att.wall
+    audio = getattr(att, "audio", None)
+    if audio:
         return await tg_bot.send_message(
-            chat_id, f"📌 пост: https://vk.com/wall{w.from_id}_{w.id}")
+            chat_id, f"🎵 {audio.artist or ''} — {audio.title or ''}".strip())
 
-    if att.link:
-        return await tg_bot.send_message(chat_id, att.link.url)
+    wall = getattr(att, "wall", None)
+    if wall:
+        return await _send_vk_wall(tg_bot, vk_user_token, chat_id, wall,
+                                   peer_id, cmid, links)
+
+    link = getattr(att, "link", None)
+    if link:
+        return await tg_bot.send_message(chat_id, link.url)
 
     return await tg_bot.send_message(chat_id, "📎 [вложение не поддерживается]")
+
+
+async def _send_vk_wall(tg_bot, vk_user_token, chat_id, w, peer_id=None, cmid=None,
+                        links=None, depth=0):
+    """Разворачивает пересланный пост VK (wall) в TG: заголовок + текст + вложения
+    + цепочку репостов (copy_history). Раньше слалась только ссылка на пост."""
+    owner_id = getattr(w, "owner_id", None) or getattr(w, "from_id", None)
+    post_id = getattr(w, "id", None)
+    link = f"https://vk.com/wall{owner_id}_{post_id}" if owner_id and post_id else None
+
+    marker = "📌" + "▸" * depth
+    header = f"<i>{marker} пост:</i>"
+    if link:
+        header += f' <a href="{link}">vk.com</a>'
+
+    text = (getattr(w, "text", None) or "").strip()
+    if text:
+        header += f"\n{html.escape(text)}"
+
+    sent = await _tg_send(tg_bot, "send_message", chat_id, None,
+                          header, parse_mode=ParseMode.HTML,
+                          link_preview_options=LinkPreviewOptions(is_disabled=True))
+    if sent and links is not None:
+        links.link(chat_id, sent.message_id, peer_id, cmid)
+
+    # Вложения самого поста.
+    await _send_vk_attachments(tg_bot, vk_user_token, chat_id,
+                               getattr(w, "attachments", None), peer_id, cmid, links)
+
+    # copy_history — если этот пост сам является репостом, разворачиваем источник.
+    for src in (getattr(w, "copy_history", None) or []):
+        await _send_vk_wall(tg_bot, vk_user_token, chat_id, src,
+                            peer_id, cmid, links, depth + 1)
+
+    return sent
 
 
 async def _send_vk_circle(tg_bot, vk_user_token, chat_id, v, peer_id=None, cmid=None):
