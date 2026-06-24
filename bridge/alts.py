@@ -14,14 +14,25 @@ import asyncio
 import logging
 import random
 
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from vkbottle import Callback, Keyboard
 
+from .formatting import format_for_tg, format_for_vk
 from .media import _download_tg
 from .state import LinkStore
 from .vk_upload import upload_doc
 from .vk_user import download_vk_video, upload_vk_video
 
 log = logging.getLogger(__name__)
+
+ALT_HELP = (
+    "Альты — сохранённые видео:\n"
+    "• ответь на видео «/alt название» — сохранить;\n"
+    "• «/alt название» (без ответа) — прислать это видео;\n"
+    "• «/alt list» — кнопки со всеми видео;\n"
+    "• «/alt search название» — найти; «/alt delete название» — удалить.\n"
+    "Альты общие для Telegram и VK: всё видно на обеих платформах."
+)
 
 
 def _random_id() -> int:
@@ -37,6 +48,75 @@ class AltService:
         self.tg_bot = None       # aiogram Bot — выставляется в main
         self.vk_api = None       # community-API VK — выставляется в main
         self.vk_group_id = None  # id сообщества — выставляется в main
+
+    # --- зеркало команд и ответов между платформами ------------------------
+    # Команды /alt перехватываются и мостом не пересылаются, а ответы шлёт сам
+    # бот (свои сообщения он не получает обратно). Поэтому, чтобы оба чата были
+    # «зеркалом», вручную дублируем и введённую команду, и ответ бота в обе
+    # стороны. Текст ответов — plain, одинаковый на обеих платформах.
+
+    @staticmethod
+    def tg_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+        rows = [[InlineKeyboardButton(text=(n or "?")[:60], callback_data=f"alt:{i}")]
+                for i, n in items[:100]]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def vk_keyboard(items: list[tuple[int, str]]) -> str:
+        kb = Keyboard(inline=False, one_time=True)
+        for idx, (i, n) in enumerate(items[:20]):
+            if idx and idx % 2 == 0:
+                kb.row()
+            kb.add(Callback((n or "?")[:40], payload={"alt": i}))
+        return kb.get_json()
+
+    async def _tg_say(self, chat_id, text, kb=None, html=False) -> None:
+        if not (chat_id and text is not None):
+            return
+        try:
+            await self.tg_bot.send_message(
+                chat_id, text, reply_markup=kb,
+                parse_mode=("HTML" if html else None))
+        except Exception:  # noqa: BLE001
+            log.exception("alt: не удалось отправить текст в TG")
+
+    async def _vk_say(self, peer_id, text, kb=None) -> None:
+        if not (peer_id and text is not None):
+            return
+        params = dict(peer_id=peer_id, message=text, random_id=_random_id())
+        if kb:
+            params["keyboard"] = kb
+        try:
+            await self.vk_api.messages.send(**params)
+        except Exception:  # noqa: BLE001
+            log.exception("alt: не удалось отправить текст в VK")
+
+    async def echo_command(self, origin: str, tg_chat_id, author: str, text: str) -> None:
+        """Показать введённую команду на ПРОТИВОПОЛОЖНОЙ платформе."""
+        vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
+        if origin == "tg":
+            await self._vk_say(vk_peer, format_for_vk("TG", author, text))
+        else:
+            await self._tg_say(tg_chat_id, format_for_tg("VK", author, text), html=True)
+
+    async def broadcast_text(self, tg_chat_id, text, items=None) -> None:
+        """Ответ бота — в оба чата. items -> меню (своя клавиатура на каждой)."""
+        vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
+        await self._tg_say(tg_chat_id, text, self.tg_keyboard(items) if items else None)
+        await self._vk_say(vk_peer, text, self.vk_keyboard(items) if items else None)
+
+    @staticmethod
+    def save_message(ok: bool, err: str | None, name: str) -> str:
+        if ok:
+            return f"✅ Сохранил альт «{name}». «/alt list» — все."
+        reason = {
+            "no_media": "в том сообщении нет видео",
+            "dup": f"альт «{name}» уже есть",
+            "no_user_token": "сохранение видео из VK недоступно (нет user-токена)",
+            "download_failed": "не удалось скачать это видео из VK",
+            "upload_failed": "не удалось сохранить видео",
+        }.get(err, "не удалось сохранить")
+        return f"⚠️ {reason}."
 
     # --- извлечение видео из сообщений --------------------------------------
 

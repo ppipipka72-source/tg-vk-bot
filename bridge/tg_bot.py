@@ -15,6 +15,7 @@ from aiogram.types import (
 )
 
 from config import Config
+from .alts import ALT_HELP
 from .media import edit_vk_from_tg, relay_link_video, send_tg_message_to_vk
 from .state import LinkStore
 from .video_dl import find_video_url
@@ -270,68 +271,54 @@ class TGSide:
         await cb.answer("Готово")
 
     # --- альты: сохранённые видео (/alt) ------------------------------------
-
-    _ALT_HELP = (
-        "<b>Альты — сохранённые видео.</b>\n"
-        "• Ответь на видео командой <code>/alt название</code> — бот запомнит его.\n"
-        "• <code>/alt название</code> (без ответа) — пришлёт это видео.\n"
-        "• <code>/alt list</code> — кнопки со всеми сохранёнными видео.\n"
-        "• <code>/alt search название</code> — найти по части имени.\n"
-        "• <code>/alt delete название</code> — удалить.\n"
-        "Альты у каждого чата свои и работают и в VK: сохранил тут — "
-        "доступно и там."
-    )
-
-    @staticmethod
-    def _alt_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
-        rows = [[InlineKeyboardButton(text=(name or "?")[:60],
-                                      callback_data=f"alt:{aid}")]
-                for aid, name in items[:100]]
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+    # Ответы шлём в ОБА чата (alts.broadcast_text), а саму команду эхом — на
+    # противоположную платформу (alts.echo_command), чтобы оба чата были
+    # зеркалом. Локальный message.reply тут не используем.
 
     async def _cmd_alt(self, message: Message, command: CommandObject) -> None:
+        chat_id = message.chat.id
+        author = message.from_user.full_name if message.from_user else "?"
+        await self.alts.echo_command("tg", chat_id, author, (message.text or "").strip())
+
         arg = (command.args or "").strip()
         if not arg:
-            await message.reply(self._ALT_HELP, parse_mode="HTML")
+            await self.alts.broadcast_text(chat_id, ALT_HELP)
             return
 
         head, _, rest = arg.partition(" ")
         sub = head.casefold()
         rest = rest.strip()
-        chat_id = message.chat.id
 
         if sub == "list":
             items = self.links.list_alts(chat_id)
             if not items:
-                await message.reply("В этом чате пока нет сохранённых альтов. "
-                                    "Ответь на видео командой /alt название.")
-                return
-            await message.reply(f"Сохранённые альты ({len(items)}):",
-                                reply_markup=self._alt_keyboard(items))
+                await self.alts.broadcast_text(
+                    chat_id, "В этом чате пока нет сохранённых альтов. "
+                    "Ответь на видео «/alt название».")
+            else:
+                await self.alts.broadcast_text(
+                    chat_id, f"Сохранённые альты ({len(items)}):", items)
             return
 
         if sub == "search":
             if not rest:
-                await message.reply("Что искать? <code>/alt search часть_имени</code>",
-                                    parse_mode="HTML")
+                await self.alts.broadcast_text(chat_id, "Что искать? «/alt search часть_имени»")
                 return
             items = self.links.search_alts(chat_id, rest)
             if not items:
-                await message.reply(f"По запросу «{html.escape(rest)}» ничего не нашёл.")
-                return
-            await message.reply(f"Нашёл ({len(items)}):",
-                                reply_markup=self._alt_keyboard(items))
+                await self.alts.broadcast_text(chat_id, f"По запросу «{rest}» ничего не нашёл.")
+            else:
+                await self.alts.broadcast_text(chat_id, f"Нашёл ({len(items)}):", items)
             return
 
         if sub == "delete":
             if not rest:
-                await message.reply("Что удалить? <code>/alt delete название</code>",
-                                    parse_mode="HTML")
+                await self.alts.broadcast_text(chat_id, "Что удалить? «/alt delete название»")
                 return
             if self.links.delete_alt(chat_id, rest):
-                await message.reply(f"🗑 Удалил альт «{html.escape(rest)}».")
+                await self.alts.broadcast_text(chat_id, f"🗑 Удалил альт «{rest}».")
             else:
-                await message.reply(f"Альта «{html.escape(rest)}» нет в этом чате.")
+                await self.alts.broadcast_text(chat_id, f"Альта «{rest}» нет в этом чате.")
             return
 
         # Иначе arg — это название. С ответом на видео — сохраняем; без
@@ -340,30 +327,19 @@ class TGSide:
         reply = message.reply_to_message
         if reply is not None:
             if len(name) > 64:
-                await message.reply("Слишком длинное название (максимум 64 символа).")
+                await self.alts.broadcast_text(chat_id, "Слишком длинное название (макс. 64).")
                 return
             created_by = message.from_user.id if message.from_user else 0
             ok, err = await self.alts.save_from_tg(chat_id, name, reply, created_by)
-            if ok:
-                await message.reply(f"✅ Сохранил альт «{html.escape(name)}». "
-                                    f"<code>/alt list</code> — все.", parse_mode="HTML")
-            elif err == "no_media":
-                await message.reply("В том сообщении нет видео.")
-            elif err == "dup":
-                await message.reply(
-                    f"Альт «{html.escape(name)}» уже есть. Удали старый: "
-                    f"<code>/alt delete {html.escape(name)}</code>", parse_mode="HTML")
-            else:
-                await message.reply("Не удалось сохранить альт.")
+            await self.alts.broadcast_text(chat_id, self.alts.save_message(ok, err, name))
             return
 
-        # Без ответа — выдача по имени.
+        # Без ответа — выдача по имени (видео уходит в оба чата).
         alt = self.links.get_alt(chat_id, name)
         if alt is None:
-            await message.reply(
-                f"Альта «{html.escape(name)}» нет. <code>/alt list</code> — список, "
-                f"или ответь на видео <code>/alt {html.escape(name)}</code>, чтобы "
-                f"сохранить.", parse_mode="HTML")
+            await self.alts.broadcast_text(
+                chat_id, f"Альта «{name}» нет. «/alt list» — список, "
+                f"или ответь на видео «/alt {name}», чтобы сохранить.")
             return
         try:
             ok = await self.alts.send_both(alt)
@@ -371,7 +347,7 @@ class TGSide:
             log.exception("alt: ошибка выдачи «%s»", name)
             ok = False
         if not ok:
-            await message.reply("Не удалось отправить это видео.")
+            await self.alts.broadcast_text(chat_id, "Не удалось отправить это видео.")
 
     async def _on_alt_cb(self, cb: CallbackQuery) -> None:
         try:
