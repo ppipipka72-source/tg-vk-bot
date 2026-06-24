@@ -13,6 +13,7 @@
 import asyncio
 import logging
 import random
+from datetime import datetime
 
 from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from vkbottle import Callback, Keyboard
@@ -208,6 +209,15 @@ class AltService:
 
     # --- выдача --------------------------------------------------------------
 
+    @staticmethod
+    def caption(alt) -> str:
+        """Подпись к видео: название + дата добавления."""
+        name = alt["name"] or "видео"
+        ts = alt["created_at"]
+        if ts:
+            return f"🎬 {name}\n📅 {datetime.fromtimestamp(ts):%d.%m.%Y}"
+        return f"🎬 {name}"
+
     async def send_both(self, alt) -> bool:
         """Отправить альт сразу в TG-чат И в парную VK-беседу.
 
@@ -235,16 +245,17 @@ class AltService:
 
     async def send_to_tg(self, chat_id, alt) -> bool:
         """Отправить альт в TG-чат. Лениво конвертирует VK→TG и кеширует."""
+        cap = self.caption(alt)
         file_id = alt["tg_file_id"]
         if file_id:
-            await self._tg_send_by_kind(chat_id, alt["kind"] or "video", file_id)
+            await self._tg_send_by_kind(chat_id, alt["kind"] or "video", file_id, cap)
             return True
 
         # Легаси-альт старого формата: только координаты исходного сообщения.
         if alt["origin"] == "tg" and alt["src_chat_id"] and alt["src_msg_id"]:
             await self.tg_bot.copy_message(
                 chat_id=chat_id, from_chat_id=alt["src_chat_id"],
-                message_id=alt["src_msg_id"])
+                message_id=alt["src_msg_id"], caption=cap)
             return True
 
         # VK-origin без TG-кеша: качаем наше видео, шлём, кешируем file_id.
@@ -254,7 +265,7 @@ class AltService:
             data = await download_vk_video(self.cfg.vk_user_token, owner, vid, key)
             if data:
                 sent = await self.tg_bot.send_video(
-                    chat_id, BufferedInputFile(data, filename="video.mp4"))
+                    chat_id, BufferedInputFile(data, filename="video.mp4"), caption=cap)
                 fid = sent.video.file_id if sent and sent.video else None
                 if fid:
                     self.links.set_alt_tg(alt["id"], fid, "video")
@@ -263,10 +274,11 @@ class AltService:
 
     async def send_to_vk(self, peer_id, alt) -> bool:
         """Отправить альт в VK-беседу. Лениво конвертирует TG→VK и кеширует."""
+        cap = self.caption(alt)
         att = alt["vk_attachment"]
         if att:
             await self.vk_api.messages.send(
-                peer_id=peer_id, attachment=att, random_id=_random_id())
+                peer_id=peer_id, message=cap, attachment=att, random_id=_random_id())
             return True
 
         # TG-origin без VK-кеша: качаем у TG, заливаем в VK, кешируем вложение.
@@ -286,15 +298,18 @@ class AltService:
             attachment = await upload_doc(self.cfg.vk_token, peer_id, fname, data)
         self.links.set_alt_vk(alt["id"], attachment)
         await self.vk_api.messages.send(
-            peer_id=peer_id, attachment=attachment, random_id=_random_id())
+            peer_id=peer_id, message=cap, attachment=attachment, random_id=_random_id())
         return True
 
-    async def _tg_send_by_kind(self, chat_id, kind, file_id):
+    async def _tg_send_by_kind(self, chat_id, kind, file_id, caption=None):
         if kind == "animation":
-            await self.tg_bot.send_animation(chat_id, file_id)
+            await self.tg_bot.send_animation(chat_id, file_id, caption=caption)
         elif kind == "video_note":
+            # У кружков нет подписи — шлём её отдельным сообщением.
             await self.tg_bot.send_video_note(chat_id, file_id)
+            if caption:
+                await self.tg_bot.send_message(chat_id, caption)
         elif kind == "document":
-            await self.tg_bot.send_document(chat_id, file_id)
+            await self.tg_bot.send_document(chat_id, file_id, caption=caption)
         else:
-            await self.tg_bot.send_video(chat_id, file_id)
+            await self.tg_bot.send_video(chat_id, file_id, caption=caption)

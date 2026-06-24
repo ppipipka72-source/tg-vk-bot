@@ -1,4 +1,5 @@
 import sqlite3
+import time
 
 
 class LinkStore:
@@ -66,16 +67,18 @@ class LinkStore:
             "origin TEXT, kind TEXT, "
             "tg_file_id TEXT, vk_attachment TEXT, "
             "src_chat_id INTEGER, src_msg_id INTEGER, "
-            "created_by INTEGER)"
+            "created_by INTEGER, created_at INTEGER)"
         )
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS i_alts_chat ON alts(tg_chat_id)"
         )
-        # Миграция со старой схемы (без кросс-платформенных колонок).
+        # Миграция со старой схемы (без кросс-платформенных колонок и даты).
         have = {r[1] for r in self._db.execute("PRAGMA table_info(alts)").fetchall()}
         for col in ("origin", "kind", "tg_file_id", "vk_attachment"):
             if col not in have:
                 self._db.execute(f"ALTER TABLE alts ADD COLUMN {col} TEXT")
+        if "created_at" not in have:
+            self._db.execute("ALTER TABLE alts ADD COLUMN created_at INTEGER")
         self._db.commit()
         self._seen_cache: set[int] = set()
         self._trim_keep = trim_keep
@@ -251,16 +254,19 @@ class LinkStore:
     def add_alt(self, tg_chat_id: int, name: str, *, origin: str,
                 kind: str = "video", tg_file_id: str | None = None,
                 vk_attachment: str | None = None, src_chat_id: int | None = None,
-                src_msg_id: int | None = None, created_by: int = 0) -> int | None:
+                src_msg_id: int | None = None, created_by: int = 0,
+                created_at: int | None = None) -> int | None:
         """Сохранить альт. Возвращает id, либо None если имя в чате занято."""
         if self.get_alt(tg_chat_id, name) is not None:
             return None
+        if created_at is None:
+            created_at = int(time.time())
         cur = self._db.execute(
             "INSERT INTO alts(tg_chat_id, name, origin, kind, tg_file_id, "
-            "vk_attachment, src_chat_id, src_msg_id, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "vk_attachment, src_chat_id, src_msg_id, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tg_chat_id, name, origin, kind, tg_file_id, vk_attachment,
-             src_chat_id, src_msg_id, created_by))
+             src_chat_id, src_msg_id, created_by, created_at))
         self._db.commit()
         return cur.lastrowid
 
