@@ -51,6 +51,7 @@ class TGSide:
         self.vk_api = None  # выставляется в main
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main
         self.discord = None  # DiscordSide, выставляется в main (если включён Discord)
+        self.alts = None  # AltService, выставляется в main
 
         # Команды управления (только владельцы) — регистрируем ДО общего хендлера.
         self.dp.message(Command("link"))(self._cmd_link)
@@ -270,15 +271,15 @@ class TGSide:
 
     # --- альты: сохранённые видео (/alt) ------------------------------------
 
-    _ALT_MEDIA = ("video", "animation", "video_note", "document")
     _ALT_HELP = (
         "<b>Альты — сохранённые видео.</b>\n"
-        "• Ответь на видео командой <code>/alt название</code> — бот запомнит "
-        "его (файл на сервер не качается).\n"
+        "• Ответь на видео командой <code>/alt название</code> — бот запомнит его.\n"
+        "• <code>/alt название</code> (без ответа) — пришлёт это видео.\n"
         "• <code>/alt list</code> — кнопки со всеми сохранёнными видео.\n"
         "• <code>/alt search название</code> — найти по части имени.\n"
         "• <code>/alt delete название</code> — удалить.\n"
-        "Альты у каждого чата свои."
+        "Альты у каждого чата свои и работают и в VK: сохранил тут — "
+        "доступно и там."
     )
 
     @staticmethod
@@ -333,31 +334,44 @@ class TGSide:
                 await message.reply(f"Альта «{html.escape(rest)}» нет в этом чате.")
             return
 
-        # Иначе arg — это название для сохранения: команда должна быть ответом
-        # на сообщение с видео.
+        # Иначе arg — это название. С ответом на видео — сохраняем; без
+        # ответа — присылаем ранее сохранённый альт с таким именем.
         name = arg
         reply = message.reply_to_message
-        if reply is None:
+        if reply is not None:
+            if len(name) > 64:
+                await message.reply("Слишком длинное название (максимум 64 символа).")
+                return
+            created_by = message.from_user.id if message.from_user else 0
+            ok, err = await self.alts.save_from_tg(chat_id, name, reply, created_by)
+            if ok:
+                await message.reply(f"✅ Сохранил альт «{html.escape(name)}». "
+                                    f"<code>/alt list</code> — все.", parse_mode="HTML")
+            elif err == "no_media":
+                await message.reply("В том сообщении нет видео.")
+            elif err == "dup":
+                await message.reply(
+                    f"Альт «{html.escape(name)}» уже есть. Удали старый: "
+                    f"<code>/alt delete {html.escape(name)}</code>", parse_mode="HTML")
+            else:
+                await message.reply("Не удалось сохранить альт.")
+            return
+
+        # Без ответа — выдача по имени.
+        alt = self.links.get_alt(chat_id, name)
+        if alt is None:
             await message.reply(
-                "Чтобы сохранить альт, ответь этой командой на сообщение с видео:\n"
-                "<code>/alt название</code>", parse_mode="HTML")
+                f"Альта «{html.escape(name)}» нет. <code>/alt list</code> — список, "
+                f"или ответь на видео <code>/alt {html.escape(name)}</code>, чтобы "
+                f"сохранить.", parse_mode="HTML")
             return
-        if not any(getattr(reply, kind, None) for kind in self._ALT_MEDIA):
-            await message.reply("В том сообщении нет видео.")
-            return
-        if len(name) > 64:
-            await message.reply("Слишком длинное название (максимум 64 символа).")
-            return
-        created_by = message.from_user.id if message.from_user else 0
-        ok = self.links.add_alt(chat_id, name, reply.chat.id, reply.message_id,
-                                created_by)
+        try:
+            ok = await self.alts.send_to_tg(chat_id, alt)
+        except Exception:  # noqa: BLE001
+            log.exception("alt: ошибка выдачи «%s»", name)
+            ok = False
         if not ok:
-            await message.reply(
-                f"Альт «{html.escape(name)}» уже есть. Удали старый: "
-                f"<code>/alt delete {html.escape(name)}</code>", parse_mode="HTML")
-            return
-        await message.reply(f"✅ Сохранил альт «{html.escape(name)}». "
-                            f"<code>/alt list</code> — все.", parse_mode="HTML")
+            await message.reply("Не удалось отправить это видео.")
 
     async def _on_alt_cb(self, cb: CallbackQuery) -> None:
         try:
@@ -369,17 +383,15 @@ class TGSide:
         if not row:
             await cb.answer("Этот альт уже удалён.", show_alert=True)
             return
-        _id, name, src_chat_id, src_msg_id, _chat = row
         try:
-            await self.bot.copy_message(
-                chat_id=cb.message.chat.id,
-                from_chat_id=src_chat_id,
-                message_id=src_msg_id)
-            await cb.answer()
+            ok = await self.alts.send_to_tg(cb.message.chat.id, row)
         except Exception:  # noqa: BLE001
-            log.exception("alt: не удалось отправить видео «%s»", name)
-            await cb.answer("Не удалось отправить видео — возможно, исходное "
-                            "сообщение удалено.", show_alert=True)
+            log.exception("alt: не удалось отправить видео «%s»", row["name"])
+            ok = False
+        if ok:
+            await cb.answer()
+        else:
+            await cb.answer("Не удалось отправить видео.", show_alert=True)
 
     # --- обычные сообщения --------------------------------------------------
 

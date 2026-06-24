@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from config import load_config
+from .alts import AltService
 from .state import LinkStore
 from .tg_bot import TGSide
 from .vk_bot import VKSide
@@ -44,6 +45,15 @@ async def run() -> None:
             log.warning("Не удалось определить group_id — видео пойдёт документом")
     if cfg.vk_user_token:
         log.info("User-токен подключён: видео будет нативным")
+
+    # Сервис альтов (сохранённые видео): общий для TG- и VK-стороны, умеет
+    # кросс-платформенную выдачу (сохранил в TG — отдал в VK и наоборот).
+    alts = AltService(cfg, links)
+    alts.tg_bot = tg.bot
+    alts.vk_api = vk.api
+    alts.vk_group_id = tg.vk_group_id
+    tg.alts = alts
+    vk.alts = alts
 
     tasks = [vk.start(), tg.start()]
 

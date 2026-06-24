@@ -13,6 +13,9 @@ class LinkStore:
 
     def __init__(self, path: str = "links.db", trim_keep: int = 100000):
         self._db = sqlite3.connect(path)
+        # Row-доступ по имени колонки (для альтов); индексный доступ r[0] тоже
+        # продолжает работать, так что остальной код не ломается.
+        self._db.row_factory = sqlite3.Row
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS msg_links ("
             "tg_chat_id INTEGER, tg_msg_id INTEGER, "
@@ -49,19 +52,30 @@ class LinkStore:
             "username TEXT, full_name TEXT, "
             "PRIMARY KEY (tg_chat_id, user_id))"
         )
-        # Сохранённые видео («альты», команда /alt): храним лишь координаты
-        # исходного сообщения (src_chat_id, src_msg_id), чтобы отдавать видео
-        # через copy_message и не качать файл на сервер. Альты — на каждый чат.
+        # Сохранённые видео («альты», команда /alt). Альты — на каждый чат
+        # (ключ — tg_chat_id, он же определяет VK-беседу через pairs).
+        # Кросс-платформенная выдача: храним хэндл на КАЖДОЙ платформе —
+        #   tg_file_id    — file_id видео в Telegram (мгновенная выдача в TG);
+        #   vk_attachment — строка video{owner}_{id}_{key} в VK (выдача в VK).
+        # Недостающую сторону достраиваем лениво при первом запросе и кешируем.
+        # origin — где сохранён изначально; kind — тип TG-медиа для отправки.
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS alts ("
             "id INTEGER PRIMARY KEY, "
             "tg_chat_id INTEGER, name TEXT, "
+            "origin TEXT, kind TEXT, "
+            "tg_file_id TEXT, vk_attachment TEXT, "
             "src_chat_id INTEGER, src_msg_id INTEGER, "
             "created_by INTEGER)"
         )
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS i_alts_chat ON alts(tg_chat_id)"
         )
+        # Миграция со старой схемы (без кросс-платформенных колонок).
+        have = {r[1] for r in self._db.execute("PRAGMA table_info(alts)").fetchall()}
+        for col in ("origin", "kind", "tg_file_id", "vk_attachment"):
+            if col not in have:
+                self._db.execute(f"ALTER TABLE alts ADD COLUMN {col} TEXT")
         self._db.commit()
         self._seen_cache: set[int] = set()
         self._trim_keep = trim_keep
@@ -232,54 +246,70 @@ class LinkStore:
     # Сравнение имён регистронезависимое и работает с кириллицей, поэтому
     # совпадение/поиск делаем в Python через casefold (SQLite NOCASE/LIKE
     # умеют только ASCII). Альтов на чат немного — это дёшево.
+    # Строки возвращаются как sqlite3.Row: поля доступны по имени (r["name"]).
 
-    def _alt_rows(self, tg_chat_id: int) -> list[tuple]:
-        """Сырые строки альтов чата: [(id, name, src_chat_id, src_msg_id), ...]."""
-        return self._db.execute(
-            "SELECT id, name, src_chat_id, src_msg_id FROM alts "
-            "WHERE tg_chat_id=? ORDER BY rowid", (tg_chat_id,)).fetchall()
-
-    def add_alt(self, tg_chat_id: int, name: str, src_chat_id: int,
-                src_msg_id: int, created_by: int) -> bool:
-        """Сохранить альт. False, если имя в этом чате уже занято."""
+    def add_alt(self, tg_chat_id: int, name: str, *, origin: str,
+                kind: str = "video", tg_file_id: str | None = None,
+                vk_attachment: str | None = None, src_chat_id: int | None = None,
+                src_msg_id: int | None = None, created_by: int = 0) -> int | None:
+        """Сохранить альт. Возвращает id, либо None если имя в чате занято."""
         if self.get_alt(tg_chat_id, name) is not None:
-            return False
-        self._db.execute(
-            "INSERT INTO alts(tg_chat_id, name, src_chat_id, src_msg_id, created_by) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (tg_chat_id, name, src_chat_id, src_msg_id, created_by))
+            return None
+        cur = self._db.execute(
+            "INSERT INTO alts(tg_chat_id, name, origin, kind, tg_file_id, "
+            "vk_attachment, src_chat_id, src_msg_id, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tg_chat_id, name, origin, kind, tg_file_id, vk_attachment,
+             src_chat_id, src_msg_id, created_by))
         self._db.commit()
-        return True
+        return cur.lastrowid
 
-    def get_alt(self, tg_chat_id: int, name: str) -> tuple | None:
-        """Найти альт по имени (регистронезависимо): (id, name, src_chat_id, src_msg_id)."""
+    def get_alt(self, tg_chat_id: int, name: str) -> sqlite3.Row | None:
+        """Найти альт по имени (регистронезависимо). Полная строка или None."""
         key = name.casefold()
-        for r in self._alt_rows(tg_chat_id):
-            if (r[1] or "").casefold() == key:
+        rows = self._db.execute(
+            "SELECT * FROM alts WHERE tg_chat_id=? ORDER BY rowid",
+            (tg_chat_id,)).fetchall()
+        for r in rows:
+            if (r["name"] or "").casefold() == key:
                 return r
         return None
 
-    def get_alt_by_id(self, alt_id: int) -> tuple | None:
-        """Альт по id: (id, name, src_chat_id, src_msg_id, tg_chat_id)."""
+    def get_alt_by_id(self, alt_id: int) -> sqlite3.Row | None:
+        """Альт по id (полная строка) или None."""
         return self._db.execute(
-            "SELECT id, name, src_chat_id, src_msg_id, tg_chat_id FROM alts "
-            "WHERE id=?", (alt_id,)).fetchone()
+            "SELECT * FROM alts WHERE id=?", (alt_id,)).fetchone()
 
     def list_alts(self, tg_chat_id: int) -> list[tuple[int, str]]:
         """Все альты чата: [(id, name), ...]."""
-        return [(r[0], r[1] or "") for r in self._alt_rows(tg_chat_id)]
+        return [(r["id"], r["name"] or "") for r in self._db.execute(
+            "SELECT id, name FROM alts WHERE tg_chat_id=? ORDER BY rowid",
+            (tg_chat_id,)).fetchall()]
 
     def search_alts(self, tg_chat_id: int, query: str) -> list[tuple[int, str]]:
         """Альты чата, чьё имя содержит query (регистронезависимо)."""
         q = query.casefold()
-        return [(r[0], r[1] or "") for r in self._alt_rows(tg_chat_id)
-                if q in (r[1] or "").casefold()]
+        return [(r[0], r[1] or "") for r in self._db.execute(
+            "SELECT id, name FROM alts WHERE tg_chat_id=? ORDER BY rowid",
+            (tg_chat_id,)).fetchall() if q in (r[1] or "").casefold()]
 
     def delete_alt(self, tg_chat_id: int, name: str) -> bool:
         """Удалить альт по имени. False, если не нашли."""
         row = self.get_alt(tg_chat_id, name)
         if not row:
             return False
-        self._db.execute("DELETE FROM alts WHERE id=?", (row[0],))
+        self._db.execute("DELETE FROM alts WHERE id=?", (row["id"],))
         self._db.commit()
         return True
+
+    def set_alt_tg(self, alt_id: int, tg_file_id: str, kind: str = "video") -> None:
+        """Закешировать TG-хэндл (после ленивой конвертации VK→TG)."""
+        self._db.execute("UPDATE alts SET tg_file_id=?, kind=? WHERE id=?",
+                         (tg_file_id, kind, alt_id))
+        self._db.commit()
+
+    def set_alt_vk(self, alt_id: int, vk_attachment: str) -> None:
+        """Закешировать VK-вложение (после ленивой конвертации TG→VK)."""
+        self._db.execute("UPDATE alts SET vk_attachment=? WHERE id=?",
+                         (vk_attachment, alt_id))
+        self._db.commit()
