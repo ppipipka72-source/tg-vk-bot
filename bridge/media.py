@@ -12,6 +12,7 @@ import logging
 import os
 import random
 
+import aiohttp
 from aiogram import Bot as TgBot
 from aiogram.enums import ParseMode
 from aiogram.types import BufferedInputFile, LinkPreviewOptions, ReplyParameters
@@ -19,6 +20,7 @@ from PIL import Image
 
 from .formatting import format_for_tg, format_for_vk
 from .state import LinkStore
+from .stt import transcribe_voice
 from .video_dl import download_video, find_video_url
 from .vk_upload import upload_doc, upload_photo, upload_voice
 from .vk_user import download_vk_video, resolve_message_link, upload_vk_video
@@ -247,7 +249,9 @@ def _max_size_url(sizes) -> str | None:
 
 
 async def send_vk_message_to_tg(tg_bot, vk_user_token, chat_id, name, message,
-                                links: LinkStore) -> None:
+                                links: LinkStore) -> int | None:
+    """Переносит сообщение VK в TG. Возвращает message_id пересланного голосового
+    (audio_message) в TG, если оно было — нужно, чтобы ответить на него расшифровкой."""
     body = message.text or ""
     header = format_for_tg("VK", name, body)
 
@@ -269,8 +273,9 @@ async def send_vk_message_to_tg(tg_bot, vk_user_token, chat_id, name, message,
     if sent:
         links.link(chat_id, sent.message_id, message.peer_id, vk_cmid)
 
-    await _send_vk_attachments(tg_bot, vk_user_token, chat_id,
-                               message.attachments, message.peer_id, vk_cmid, links)
+    voice_tg_id = await _send_vk_attachments(
+        tg_bot, vk_user_token, chat_id,
+        message.attachments, message.peer_id, vk_cmid, links)
 
     # Пересланные пачки сообщений (fwd_messages) — их текст и вложения лежат
     # вложенно и в attachments не попадают; разворачиваем рекурсивно.
@@ -278,10 +283,25 @@ async def send_vk_message_to_tg(tg_bot, vk_user_token, chat_id, name, message,
         await _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id,
                                     message.fwd_messages, message.peer_id, vk_cmid, links)
 
+    return voice_tg_id
+
+
+def find_vk_voice(attachments):
+    """Первое голосовое (audio_message) среди вложений VK-сообщения, иначе None."""
+    for att in attachments or []:
+        am = getattr(att, "audio_message", None)
+        if am is not None:
+            return am
+    return None
+
 
 async def _send_vk_attachments(tg_bot, vk_user_token, chat_id, attachments,
-                               peer_id, vk_cmid, links: LinkStore) -> None:
-    """Переносит список VK-вложений в TG; ошибка одного не роняет остальные."""
+                               peer_id, vk_cmid, links: LinkStore) -> int | None:
+    """Переносит список VK-вложений в TG; ошибка одного не роняет остальные.
+
+    Возвращает message_id отправленного в TG голосового (audio_message), если оно
+    было — чтобы ответить на него расшифровкой."""
+    voice_tg_id = None
     for att in (attachments or []):
         try:
             sent_att = await _send_one_vk_attachment(
@@ -289,9 +309,12 @@ async def _send_vk_attachments(tg_bot, vk_user_token, chat_id, attachments,
             # Линкуем и медиа: ответить в TG можно хоть на фото/видео.
             if sent_att:
                 links.link(chat_id, sent_att.message_id, peer_id, vk_cmid)
+                if getattr(att, "audio_message", None) is not None:
+                    voice_tg_id = sent_att.message_id
         except Exception:  # noqa: BLE001
             log.exception("VK->TG: не удалось перенести вложение")
             await tg_bot.send_message(chat_id, "⚠️ вложение не удалось перенести")
+    return voice_tg_id
 
 
 async def _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id, fwd_messages,
@@ -543,3 +566,59 @@ async def _vk_send_video_reply(vk_api, vk_token, vk_user_token, vk_group_id,
     except Exception:  # noqa: BLE001 — reply мог не пройти -> шлём без него
         log.exception("link-video VK: reply (cmid=%s) не прошёл, шлю без reply", reply_cmid)
         await vk_api.messages.send(**params)
+
+
+# --------------------------------------------------------------------------- #
+#  Расшифровка голосовых -> ответом в оба чата
+# --------------------------------------------------------------------------- #
+
+async def _download_url(url: str) -> bytes | None:
+    """Скачать небольшой файл (голосовое) по прямой ссылке в память."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
+
+async def relay_voice_transcript(tg_bot, vk_api, *, tg_chat_id, tg_reply_to,
+                                 vk_peer_id, vk_reply_cmid,
+                                 ogg_url=None, tg_file_id=None) -> None:
+    """Распознать речь в голосовом и отправить расшифровку ответом в оба чата.
+
+    Источник аудио: либо прямая ссылка VK (ogg_url), либо file_id Telegram
+    (tg_file_id). tg_reply_to / vk_reply_cmid — на какие сообщения отвечать в TG
+    и VK (любой может быть None — туда не отвечаем). Фоновая задача: ошибки гасим,
+    мост не роняем.
+    """
+    try:
+        if tg_file_id:
+            data = await _download_tg(tg_bot, tg_file_id)
+        elif ogg_url:
+            data = await _download_url(ogg_url)
+        else:
+            return
+
+        text = await transcribe_voice(data)
+        if not text:
+            return
+
+        label = f"📝 {text}"
+        if tg_reply_to:
+            try:
+                await _tg_send(tg_bot, "send_message", tg_chat_id, tg_reply_to, label)
+            except Exception:  # noqa: BLE001
+                log.exception("STT: не удалось отправить расшифровку в TG")
+        if vk_api is not None and vk_reply_cmid:
+            forward = json.dumps({"peer_id": vk_peer_id,
+                                  "conversation_message_ids": [vk_reply_cmid],
+                                  "is_reply": True})
+            try:
+                await vk_api.messages.send(peer_id=vk_peer_id, message=label,
+                                           random_id=_random_id(), forward=forward)
+            except Exception:  # noqa: BLE001 — reply мог не пройти -> без него
+                log.exception("STT: VK reply (cmid=%s) не прошёл, шлю без reply",
+                              vk_reply_cmid)
+                await vk_api.messages.send(peer_id=vk_peer_id, message=label,
+                                           random_id=_random_id())
+    except Exception:  # noqa: BLE001
+        log.exception("STT: ошибка расшифровки голосового")

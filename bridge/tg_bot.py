@@ -16,7 +16,12 @@ from aiogram.types import (
 
 from config import Config
 from .alts import ALT_HELP
-from .media import edit_vk_from_tg, relay_link_video, send_tg_message_to_vk
+from .media import (
+    edit_vk_from_tg,
+    relay_link_video,
+    relay_voice_transcript,
+    send_tg_message_to_vk,
+)
 from .state import LinkStore
 from .video_dl import find_video_url
 
@@ -417,6 +422,16 @@ class TGSide:
                 self.bot, self.vk_api, message.chat.id, vk_peer_id,
                 self.cfg.vk_token, self.cfg.vk_user_token, self.vk_group_id,
                 text, message.message_id, vk_anchor))
+
+        # Голосовое из TG: расшифровываем и отвечаем текстом в TG (на оригинал)
+        # и в VK (на пересланную версию). Фоном — Vosk/ffmpeg блокирующие.
+        if message.voice:
+            vk_cmid = self.links.vk_for_tg(message.chat.id, message.message_id)
+            asyncio.create_task(relay_voice_transcript(
+                self.bot, self.vk_api,
+                tg_chat_id=message.chat.id, tg_reply_to=message.message_id,
+                vk_peer_id=vk_peer_id, vk_reply_cmid=vk_cmid,
+                tg_file_id=message.voice.file_id))
 
     async def _tag_everyone(self, message: Message) -> None:
         """Ответить на @all упоминаниями всех накопленных участников чата."""

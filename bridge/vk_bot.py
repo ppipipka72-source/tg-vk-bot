@@ -7,7 +7,12 @@ from vkbottle.bot import Bot, Message, MessageEventMin
 
 from config import Config
 from .alts import ALT_HELP
-from .media import relay_link_video, send_vk_message_to_tg
+from .media import (
+    find_vk_voice,
+    relay_link_video,
+    relay_voice_transcript,
+    send_vk_message_to_tg,
+)
 from .state import LinkStore
 from .video_dl import find_video_url
 
@@ -77,12 +82,24 @@ class VKSide:
             return
 
         name = await self._resolve_name(message.from_id)
+        tg_voice_id = None
         try:
-            await send_vk_message_to_tg(
+            tg_voice_id = await send_vk_message_to_tg(
                 self.tg_bot, self.cfg.vk_user_token, tg_chat_id,
                 name, message, self.links)
         except Exception:  # noqa: BLE001
             log.exception("VK->TG: ошибка доставки сообщения")
+
+        # Голосовое из VK: расшифровываем и отвечаем текстом в VK (на оригинал)
+        # и в TG (на пересланную версию). Фоном — Vosk/ffmpeg блокирующие.
+        voice = find_vk_voice(message.attachments)
+        if voice is not None:
+            vk_cmid = message.conversation_message_id or message.id
+            asyncio.create_task(relay_voice_transcript(
+                self.tg_bot, self.api,
+                tg_chat_id=tg_chat_id, tg_reply_to=tg_voice_id,
+                vk_peer_id=message.peer_id, vk_reply_cmid=vk_cmid,
+                ogg_url=(voice.link_ogg or voice.link_mp3)))
 
         # Ссылка на видео (TikTok/Shorts/Reels) -> качаем и отвечаем в оба чата.
         text = message.text or ""
