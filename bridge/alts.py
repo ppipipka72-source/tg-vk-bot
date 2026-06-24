@@ -19,12 +19,17 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from vkbottle import Callback, Keyboard
 
 from .formatting import format_for_tg, format_for_vk
-from .media import _download_tg
+from .media import _cmid_from_send, _download_tg
 from .state import LinkStore
 from .vk_upload import upload_doc
 from .vk_user import download_vk_video, upload_vk_video
 
 log = logging.getLogger(__name__)
+
+# VK inline-меню: страница (лимит inline — 6 кнопок, 6-я под «ещё») и через
+# сколько секунд неактивное меню само закрывается (убираем кнопки).
+_MENU_PAGE = 5
+_MENU_TTL = 90
 
 ALT_HELP = (
     "Альты — сохранённые видео:\n"
@@ -49,6 +54,8 @@ class AltService:
         self.tg_bot = None       # aiogram Bot — выставляется в main
         self.vk_api = None       # community-API VK — выставляется в main
         self.vk_group_id = None  # id сообщества — выставляется в main
+        # Таймеры авто-закрытия VK-меню: {conversation_message_id: asyncio.Task}.
+        self._menu_timers: dict[int, asyncio.Task] = {}
 
     # --- зеркало команд и ответов между платформами ------------------------
     # Команды /alt перехватываются и мостом не пересылаются, а ответы шлёт сам
@@ -63,13 +70,35 @@ class AltService:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
-    def vk_keyboard(items: list[tuple[int, str]]) -> str:
-        kb = Keyboard(inline=False, one_time=True)
-        for idx, (i, n) in enumerate(items[:20]):
-            if idx and idx % 2 == 0:
+    def vk_menu_keyboard(items: list[tuple[int, str]], page: int, query: str) -> str:
+        """VK inline-меню альтов: до 5 кнопок-альтов + «ещё» для листания."""
+        pages = max(1, (len(items) + _MENU_PAGE - 1) // _MENU_PAGE)
+        page = max(0, min(page, pages - 1))
+        chunk = items[page * _MENU_PAGE:(page + 1) * _MENU_PAGE]
+        kb = Keyboard(inline=True)
+        for i, (aid, name) in enumerate(chunk):
+            if i:
                 kb.row()
-            kb.add(Callback((n or "?")[:40], payload={"alt": i}))
+            kb.add(Callback((name or "?")[:40], payload={"a": aid}))
+        if pages > 1:
+            kb.row()
+            kb.add(Callback(f"ещё ▶️ {page + 1}/{pages}",
+                            payload={"p": (page + 1) % pages, "q": query[:100]}))
         return kb.get_json()
+
+    @staticmethod
+    def empty_keyboard() -> str:
+        """Пустая inline-клавиатура — чтобы убрать кнопки при редактировании."""
+        return Keyboard(inline=True).get_json()
+
+    def menu_items(self, tg_chat_id, query: str) -> list[tuple[int, str]]:
+        return (self.links.search_alts(tg_chat_id, query) if query
+                else self.links.list_alts(tg_chat_id))
+
+    @staticmethod
+    def menu_header(items, query: str) -> str:
+        return (f"Нашёл ({len(items)}):" if query
+                else f"Сохранённые альты ({len(items)}):")
 
     async def _tg_say(self, chat_id, text, kb=None, html=False) -> None:
         if not (chat_id and text is not None):
@@ -100,11 +129,57 @@ class AltService:
         else:
             await self._tg_say(tg_chat_id, format_for_tg("VK", author, text), html=True)
 
-    async def broadcast_text(self, tg_chat_id, text, items=None) -> None:
-        """Ответ бота — в оба чата. items -> меню (своя клавиатура на каждой)."""
+    async def broadcast_text(self, tg_chat_id, text) -> None:
+        """Простой ответ бота (без кнопок) — в оба чата."""
         vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
-        await self._tg_say(tg_chat_id, text, self.tg_keyboard(items) if items else None)
-        await self._vk_say(vk_peer, text, self.vk_keyboard(items) if items else None)
+        await self._tg_say(tg_chat_id, text)
+        await self._vk_say(vk_peer, text)
+
+    async def broadcast_menu(self, tg_chat_id, text, items, query="") -> None:
+        """Меню альтов — в оба чата. TG: inline-список целиком. VK: inline по
+        страницам, с авто-закрытием и сворачиванием после выбора."""
+        vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
+        await self._tg_say(tg_chat_id, text, self.tg_keyboard(items))
+        if vk_peer:
+            await self.send_vk_menu(vk_peer, text, items, query)
+
+    async def send_vk_menu(self, peer_id, text, items, query) -> None:
+        kb = self.vk_menu_keyboard(items, 0, query)
+        try:
+            # peer_ids-форма нужна, чтобы получить conversation_message_id
+            # отправленного меню — по нему потом редактируем/закрываем кнопки.
+            resp = await self.vk_api.messages.send(
+                peer_ids=[peer_id], message=text, keyboard=kb, random_id=_random_id())
+        except Exception:  # noqa: BLE001
+            log.exception("alt: не удалось отправить VK-меню")
+            return
+        cmid = _cmid_from_send(resp)
+        if cmid:
+            self.schedule_menu_close(peer_id, cmid, text)
+
+    def schedule_menu_close(self, peer_id, cmid, text) -> None:
+        self.cancel_menu_timer(cmid)
+        self._menu_timers[cmid] = asyncio.create_task(
+            self._auto_close_menu(peer_id, cmid, text))
+
+    def cancel_menu_timer(self, cmid) -> None:
+        task = self._menu_timers.pop(cmid, None)
+        if task:
+            task.cancel()
+
+    async def _auto_close_menu(self, peer_id, cmid, text) -> None:
+        try:
+            await asyncio.sleep(_MENU_TTL)
+            await self.vk_api.messages.edit(
+                peer_id=peer_id, conversation_message_id=cmid,
+                message=f"{text}\n(меню закрыто — /alt list)",
+                keyboard=self.empty_keyboard())
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 — меню могли удалить/отредактировать
+            log.debug("alt: авто-закрытие VK-меню не удалось", exc_info=True)
+        finally:
+            self._menu_timers.pop(cmid, None)
 
     @staticmethod
     def save_message(ok: bool, err: str | None, name: str) -> str:

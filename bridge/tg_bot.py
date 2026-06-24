@@ -296,7 +296,7 @@ class TGSide:
                     chat_id, "В этом чате пока нет сохранённых альтов. "
                     "Ответь на видео «/alt название».")
             else:
-                await self.alts.broadcast_text(
+                await self.alts.broadcast_menu(
                     chat_id, f"Сохранённые альты ({len(items)}):", items)
             return
 
@@ -308,7 +308,7 @@ class TGSide:
             if not items:
                 await self.alts.broadcast_text(chat_id, f"По запросу «{rest}» ничего не нашёл.")
             else:
-                await self.alts.broadcast_text(chat_id, f"Нашёл ({len(items)}):", items)
+                await self.alts.broadcast_menu(chat_id, f"Нашёл ({len(items)}):", items, rest)
             return
 
         if sub == "delete":

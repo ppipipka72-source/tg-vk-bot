@@ -118,7 +118,7 @@ class VKSide:
                     tg_chat_id, "В этом чате пока нет сохранённых альтов. "
                     "Ответь на видео «/alt название».")
             else:
-                await self.alts.broadcast_text(
+                await self.alts.broadcast_menu(
                     tg_chat_id, f"Сохранённые альты ({len(items)}):", items)
             return
 
@@ -130,7 +130,7 @@ class VKSide:
             if not items:
                 await self.alts.broadcast_text(tg_chat_id, f"По запросу «{rest}» ничего не нашёл.")
             else:
-                await self.alts.broadcast_text(tg_chat_id, f"Нашёл ({len(items)}):", items)
+                await self.alts.broadcast_menu(tg_chat_id, f"Нашёл ({len(items)}):", items, rest)
             return
 
         if sub == "delete":
@@ -191,15 +191,47 @@ class VKSide:
 
     async def _on_alt_event(self, event: MessageEventMin) -> None:
         payload = event.payload or {}
-        alt_id = payload.get("alt")
-        if alt_id is None:
+        cmid = event.conversation_message_id
+
+        # Листание меню («ещё ▶️»): перерисовываем кнопки на нужную страницу.
+        if "p" in payload:
+            page = int(payload.get("p") or 0)
+            query = payload.get("q") or ""
+            tg_chat_id = self.links.tg_chat_for_vk_peer(event.peer_id)
+            items = self.alts.menu_items(tg_chat_id, query) if tg_chat_id else []
+            header = self.alts.menu_header(items, query)
+            try:
+                await event.edit_message(
+                    message=header,
+                    keyboard=self.alts.vk_menu_keyboard(items, page, query))
+            except Exception:  # noqa: BLE001
+                log.exception("alt VK: листание меню")
+            self.alts.schedule_menu_close(event.peer_id, cmid, header)
+            await event.send_empty_answer()
             return
+
+        alt_id = payload.get("a")
+        if alt_id is None:
+            await event.send_empty_answer()
+            return
+
+        # Выбор альта: убираем таймер, сворачиваем меню (кнопки пропадают),
+        # шлём видео фоном (ленивая конвертация может не уложиться в окно ответа).
+        self.alts.cancel_menu_timer(cmid)
         row = self.links.get_alt_by_id(int(alt_id))
         if not row:
+            try:
+                await event.edit_message(message="Этот альт уже удалён.",
+                                         keyboard=self.alts.empty_keyboard())
+            except Exception:  # noqa: BLE001
+                pass
             await event.show_snackbar("Этот альт уже удалён.")
             return
-        # Отвечаем на событие сразу (снять «часики»), видео шлём фоном — ленивая
-        # конвертация TG→VK может занять секунды и не уложиться в окно ответа.
+        try:
+            await event.edit_message(message=f"🎬 {row['name']}",
+                                     keyboard=self.alts.empty_keyboard())
+        except Exception:  # noqa: BLE001
+            log.exception("alt VK: сворачивание меню")
         await event.show_snackbar(f"🎬 {row['name']}")
         asyncio.create_task(self._deliver_alt(row))
 
