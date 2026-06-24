@@ -49,6 +49,19 @@ class LinkStore:
             "username TEXT, full_name TEXT, "
             "PRIMARY KEY (tg_chat_id, user_id))"
         )
+        # Сохранённые видео («альты», команда /alt): храним лишь координаты
+        # исходного сообщения (src_chat_id, src_msg_id), чтобы отдавать видео
+        # через copy_message и не качать файл на сервер. Альты — на каждый чат.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS alts ("
+            "id INTEGER PRIMARY KEY, "
+            "tg_chat_id INTEGER, name TEXT, "
+            "src_chat_id INTEGER, src_msg_id INTEGER, "
+            "created_by INTEGER)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS i_alts_chat ON alts(tg_chat_id)"
+        )
         self._db.commit()
         self._seen_cache: set[int] = set()
         self._trim_keep = trim_keep
@@ -214,3 +227,59 @@ class LinkStore:
             "DELETE FROM chat_members WHERE tg_chat_id=? AND user_id=?",
             (tg_chat_id, user_id))
         self._db.commit()
+
+    # --- сохранённые видео («альты», /alt) ----------------------------------
+    # Сравнение имён регистронезависимое и работает с кириллицей, поэтому
+    # совпадение/поиск делаем в Python через casefold (SQLite NOCASE/LIKE
+    # умеют только ASCII). Альтов на чат немного — это дёшево.
+
+    def _alt_rows(self, tg_chat_id: int) -> list[tuple]:
+        """Сырые строки альтов чата: [(id, name, src_chat_id, src_msg_id), ...]."""
+        return self._db.execute(
+            "SELECT id, name, src_chat_id, src_msg_id FROM alts "
+            "WHERE tg_chat_id=? ORDER BY rowid", (tg_chat_id,)).fetchall()
+
+    def add_alt(self, tg_chat_id: int, name: str, src_chat_id: int,
+                src_msg_id: int, created_by: int) -> bool:
+        """Сохранить альт. False, если имя в этом чате уже занято."""
+        if self.get_alt(tg_chat_id, name) is not None:
+            return False
+        self._db.execute(
+            "INSERT INTO alts(tg_chat_id, name, src_chat_id, src_msg_id, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (tg_chat_id, name, src_chat_id, src_msg_id, created_by))
+        self._db.commit()
+        return True
+
+    def get_alt(self, tg_chat_id: int, name: str) -> tuple | None:
+        """Найти альт по имени (регистронезависимо): (id, name, src_chat_id, src_msg_id)."""
+        key = name.casefold()
+        for r in self._alt_rows(tg_chat_id):
+            if (r[1] or "").casefold() == key:
+                return r
+        return None
+
+    def get_alt_by_id(self, alt_id: int) -> tuple | None:
+        """Альт по id: (id, name, src_chat_id, src_msg_id, tg_chat_id)."""
+        return self._db.execute(
+            "SELECT id, name, src_chat_id, src_msg_id, tg_chat_id FROM alts "
+            "WHERE id=?", (alt_id,)).fetchone()
+
+    def list_alts(self, tg_chat_id: int) -> list[tuple[int, str]]:
+        """Все альты чата: [(id, name), ...]."""
+        return [(r[0], r[1] or "") for r in self._alt_rows(tg_chat_id)]
+
+    def search_alts(self, tg_chat_id: int, query: str) -> list[tuple[int, str]]:
+        """Альты чата, чьё имя содержит query (регистронезависимо)."""
+        q = query.casefold()
+        return [(r[0], r[1] or "") for r in self._alt_rows(tg_chat_id)
+                if q in (r[1] or "").casefold()]
+
+    def delete_alt(self, tg_chat_id: int, name: str) -> bool:
+        """Удалить альт по имени. False, если не нашли."""
+        row = self.get_alt(tg_chat_id, name)
+        if not row:
+            return False
+        self._db.execute("DELETE FROM alts WHERE id=?", (row[0],))
+        self._db.commit()
+        return True

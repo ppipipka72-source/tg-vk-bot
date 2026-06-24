@@ -6,7 +6,7 @@ import re
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -61,6 +61,9 @@ class TGSide:
         self.dp.message(Command(commands=["vc"]))(self._cmd_vc)
         self.dp.message(Command(commands=["ds_connect"]))(self._cmd_ds_connect)
         self.dp.message(Command(commands=["ds_disconnect"]))(self._cmd_ds_disconnect)
+        # Альты (сохранённые видео) — доступны всем участникам чата.
+        self.dp.message(Command(commands=["alt"]))(self._cmd_alt)
+        self.dp.callback_query(F.data.startswith("alt:"))(self._on_alt_cb)
         self.dp.callback_query(F.data.startswith("link:"))(self._on_link_cb)
         self.dp.callback_query(F.data.startswith("dsc:"))(self._on_ds_connect_cb)
         self.dp.callback_query(F.data.startswith("dsd:"))(self._on_ds_disconnect_cb)
@@ -100,9 +103,11 @@ class TGSide:
             "• /ds_connect — привязать Discord-сервер к этому чату\n"
             "• /ds_disconnect — отвязать Discord-сервер\n"
             "• /vc — кто сейчас в голосовых (картинка; доступно всем, в TG и VK)\n"
-            "\n<b>Прочее:</b>\n"
+            "\n<b>Прочее (доступно всем):</b>\n"
             "• <code>@all</code> в сообщении — тегну всех участников чата "
-            "(кого видел писавшими). В VK не дублируется.",
+            "(кого видел писавшими). В VK не дублируется.\n"
+            "• <code>/alt</code> — сохранённые видео: ответь на видео "
+            "<code>/alt название</code>, потом <code>/alt list</code>.",
             parse_mode="HTML",
         )
 
@@ -262,6 +267,119 @@ class TGSide:
         self.links.remove_ds_binding(guild_id, cb.message.chat.id)
         await cb.message.edit_text("✅ Discord-сервер отвязан от этого чата.")
         await cb.answer("Готово")
+
+    # --- альты: сохранённые видео (/alt) ------------------------------------
+
+    _ALT_MEDIA = ("video", "animation", "video_note", "document")
+    _ALT_HELP = (
+        "<b>Альты — сохранённые видео.</b>\n"
+        "• Ответь на видео командой <code>/alt название</code> — бот запомнит "
+        "его (файл на сервер не качается).\n"
+        "• <code>/alt list</code> — кнопки со всеми сохранёнными видео.\n"
+        "• <code>/alt search название</code> — найти по части имени.\n"
+        "• <code>/alt delete название</code> — удалить.\n"
+        "Альты у каждого чата свои."
+    )
+
+    @staticmethod
+    def _alt_keyboard(items: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+        rows = [[InlineKeyboardButton(text=(name or "?")[:60],
+                                      callback_data=f"alt:{aid}")]
+                for aid, name in items[:100]]
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _cmd_alt(self, message: Message, command: CommandObject) -> None:
+        arg = (command.args or "").strip()
+        if not arg:
+            await message.reply(self._ALT_HELP, parse_mode="HTML")
+            return
+
+        head, _, rest = arg.partition(" ")
+        sub = head.casefold()
+        rest = rest.strip()
+        chat_id = message.chat.id
+
+        if sub == "list":
+            items = self.links.list_alts(chat_id)
+            if not items:
+                await message.reply("В этом чате пока нет сохранённых альтов. "
+                                    "Ответь на видео командой /alt название.")
+                return
+            await message.reply(f"Сохранённые альты ({len(items)}):",
+                                reply_markup=self._alt_keyboard(items))
+            return
+
+        if sub == "search":
+            if not rest:
+                await message.reply("Что искать? <code>/alt search часть_имени</code>",
+                                    parse_mode="HTML")
+                return
+            items = self.links.search_alts(chat_id, rest)
+            if not items:
+                await message.reply(f"По запросу «{html.escape(rest)}» ничего не нашёл.")
+                return
+            await message.reply(f"Нашёл ({len(items)}):",
+                                reply_markup=self._alt_keyboard(items))
+            return
+
+        if sub == "delete":
+            if not rest:
+                await message.reply("Что удалить? <code>/alt delete название</code>",
+                                    parse_mode="HTML")
+                return
+            if self.links.delete_alt(chat_id, rest):
+                await message.reply(f"🗑 Удалил альт «{html.escape(rest)}».")
+            else:
+                await message.reply(f"Альта «{html.escape(rest)}» нет в этом чате.")
+            return
+
+        # Иначе arg — это название для сохранения: команда должна быть ответом
+        # на сообщение с видео.
+        name = arg
+        reply = message.reply_to_message
+        if reply is None:
+            await message.reply(
+                "Чтобы сохранить альт, ответь этой командой на сообщение с видео:\n"
+                "<code>/alt название</code>", parse_mode="HTML")
+            return
+        if not any(getattr(reply, kind, None) for kind in self._ALT_MEDIA):
+            await message.reply("В том сообщении нет видео.")
+            return
+        if len(name) > 64:
+            await message.reply("Слишком длинное название (максимум 64 символа).")
+            return
+        created_by = message.from_user.id if message.from_user else 0
+        ok = self.links.add_alt(chat_id, name, reply.chat.id, reply.message_id,
+                                created_by)
+        if not ok:
+            await message.reply(
+                f"Альт «{html.escape(name)}» уже есть. Удали старый: "
+                f"<code>/alt delete {html.escape(name)}</code>", parse_mode="HTML")
+            return
+        await message.reply(f"✅ Сохранил альт «{html.escape(name)}». "
+                            f"<code>/alt list</code> — все.", parse_mode="HTML")
+
+    async def _on_alt_cb(self, cb: CallbackQuery) -> None:
+        try:
+            alt_id = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Некорректные данные.", show_alert=True)
+            return
+        row = self.links.get_alt_by_id(alt_id)
+        if not row:
+            await cb.answer("Этот альт уже удалён.", show_alert=True)
+            return
+        _id, name, src_chat_id, src_msg_id, _chat = row
+        try:
+            await self.bot.copy_message(
+                chat_id=cb.message.chat.id,
+                from_chat_id=src_chat_id,
+                message_id=src_msg_id)
+            await cb.answer()
+        except Exception:  # noqa: BLE001
+            log.exception("alt: не удалось отправить видео «%s»", name)
+            await cb.answer("Не удалось отправить видео — возможно, исходное "
+                            "сообщение удалено.", show_alert=True)
 
     # --- обычные сообщения --------------------------------------------------
 
