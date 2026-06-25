@@ -81,12 +81,18 @@ class VKSide:
             await self._cmd_alt(message, tg_chat_id)
             return
 
+        # Команда /prefix — личный префикс. Перехватываем (в TG не пересылаем).
+        if low == "/prefix" or low.startswith("/prefix ") or low.startswith("/prefix\n"):
+            await self._cmd_prefix(message)
+            return
+
         name = await self._resolve_name(message.from_id)
+        prefix = self.links.get_prefix("vk", message.from_id)
         tg_voice_id = None
         try:
             tg_voice_id = await send_vk_message_to_tg(
                 self.tg_bot, self.cfg.vk_user_token, tg_chat_id,
-                name, message, self.links)
+                name, message, self.links, prefix)
         except Exception:  # noqa: BLE001
             log.exception("VK->TG: ошибка доставки сообщения")
 
@@ -110,6 +116,24 @@ class VKSide:
                 self.tg_bot, self.api, tg_chat_id, message.peer_id,
                 self.cfg.vk_token, self.cfg.vk_user_token, self.vk_group_id,
                 text, tg_anchor, vk_cmid))
+
+    # --- персональный префикс (/prefix) -------------------------------------
+
+    _PREFIX_MAX = 16
+
+    async def _cmd_prefix(self, message: Message) -> None:
+        arg = (message.text or "").strip()[len("/prefix"):].strip()
+        if not arg:
+            self.links.clear_prefix("vk", message.from_id)
+            reply = "Префикс убран. Чтобы поставить — пришли «/prefix 🕋»."
+        elif len(arg) > self._PREFIX_MAX:
+            reply = f"Слишком длинный префикс (макс. {self._PREFIX_MAX} символов)."
+        else:
+            self.links.set_prefix("vk", message.from_id, arg)
+            reply = (f"Готово! Теперь твои сообщения будут с префиксом: {arg}\n"
+                     f"Убрать — «/prefix» без аргумента.")
+        await self.api.messages.send(
+            peer_id=message.peer_id, message=reply, random_id=random.getrandbits(31))
 
     # --- альты: сохранённые видео (/alt) ------------------------------------
     # Ответы шлём в ОБА чата (alts.broadcast_text), команду эхом — в парный

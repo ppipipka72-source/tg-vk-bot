@@ -88,7 +88,8 @@ def _truncate(text: str, limit: int = 80) -> str:
 # --------------------------------------------------------------------------- #
 
 async def send_tg_message_to_vk(tg_bot, vk_api, vk_token, vk_user_token, vk_group_id,
-                                peer_id, name, message, links: LinkStore) -> None:
+                                peer_id, name, message, links: LinkStore,
+                                prefix: str = "") -> None:
     body = message.text or message.caption or ""
     attachments: list[str] = []
     notes: list[str] = []
@@ -149,7 +150,7 @@ async def send_tg_message_to_vk(tg_bot, vk_api, vk_token, vk_user_token, vk_grou
         notes.append("[вложение не удалось перенести]")
 
     full_body = "\n".join(p for p in [body, *notes] if p)
-    text = format_for_vk("TG", name, full_body)
+    text = format_for_vk("TG", name, full_body, prefix)
 
     # Нативный ответ через cmid (forward+is_reply), либо цитата-фолбэк.
     reply_cmid = None
@@ -199,13 +200,13 @@ def _cmid_from_send(resp):
     return None
 
 
-async def edit_vk_from_tg(vk_api, peer_id, vk_cmid, name, body) -> None:
+async def edit_vk_from_tg(vk_api, peer_id, vk_cmid, name, body, prefix: str = "") -> None:
     """Применить правку TG-сообщения к связанному VK-сообщению (только текст).
 
     Обратное направление (VK→TG) невозможно: community-токену VK не присылает
     события правок чужих сообщений (только своих), а getHistory ему запрещён.
     """
-    text = format_for_vk("TG", name, body or "")
+    text = format_for_vk("TG", name, body or "", prefix)
     try:
         await vk_api.messages.edit(peer_id=peer_id, cmid=vk_cmid,
                                    message=text, keep_forward_messages=1)
@@ -249,11 +250,11 @@ def _max_size_url(sizes) -> str | None:
 
 
 async def send_vk_message_to_tg(tg_bot, vk_user_token, chat_id, name, message,
-                                links: LinkStore) -> int | None:
+                                links: LinkStore, prefix: str = "") -> int | None:
     """Переносит сообщение VK в TG. Возвращает message_id пересланного голосового
     (audio_message) в TG, если оно было — нужно, чтобы ответить на него расшифровкой."""
     body = message.text or ""
-    header = format_for_tg("VK", name, body)
+    header = format_for_tg("VK", name, body, prefix)
 
     # Ключ связи — conversation_message_id (стабилен для сообществ, в отличие от id).
     vk_cmid = message.conversation_message_id or message.id

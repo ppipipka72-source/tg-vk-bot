@@ -68,6 +68,8 @@ class TGSide:
         self.dp.message(Command(commands=["vc"]))(self._cmd_vc)
         self.dp.message(Command(commands=["ds_connect"]))(self._cmd_ds_connect)
         self.dp.message(Command(commands=["ds_disconnect"]))(self._cmd_ds_disconnect)
+        # Персональный префикс — доступен всем участникам чата.
+        self.dp.message(Command(commands=["prefix"]))(self._cmd_prefix)
         # Альты (сохранённые видео) — доступны всем участникам чата.
         self.dp.message(Command(commands=["alt"]))(self._cmd_alt)
         self.dp.callback_query(F.data.startswith("alt:"))(self._on_alt_cb)
@@ -113,6 +115,9 @@ class TGSide:
             "\n<b>Прочее (доступно всем):</b>\n"
             "• <code>@all</code> в сообщении — тегну всех участников чата "
             "(кого видел писавшими). В VK не дублируется.\n"
+            "• <code>/prefix 🕋</code> — поставить личный префикс перед своим "
+            "именем в пересланных сообщениях. <code>/prefix</code> без "
+            "аргумента — убрать.\n"
             "• <code>/alt</code> — сохранённые видео: ответь на видео "
             "<code>/alt название</code>, потом <code>/alt list</code>.",
             parse_mode="HTML",
@@ -275,6 +280,28 @@ class TGSide:
         await cb.message.edit_text("✅ Discord-сервер отвязан от этого чата.")
         await cb.answer("Готово")
 
+    # --- персональный префикс (/prefix) -------------------------------------
+
+    _PREFIX_MAX = 16
+
+    async def _cmd_prefix(self, message: Message, command: CommandObject) -> None:
+        if message.from_user is None:
+            return
+        arg = (command.args or "").strip()
+        if not arg:
+            self.links.clear_prefix("tg", message.from_user.id)
+            await message.reply(
+                "Префикс убран. Чтобы поставить — пришли «/prefix 🕋».")
+            return
+        if len(arg) > self._PREFIX_MAX:
+            await message.reply(
+                f"Слишком длинный префикс (макс. {self._PREFIX_MAX} символов).")
+            return
+        self.links.set_prefix("tg", message.from_user.id, arg)
+        await message.reply(
+            f"Готово! Теперь твои сообщения будут с префиксом: {arg}\n"
+            f"Убрать — «/prefix» без аргумента.")
+
     # --- альты: сохранённые видео (/alt) ------------------------------------
     # Ответы шлём в ОБА чата (alts.broadcast_text), а саму команду эхом — на
     # противоположную платформу (alts.echo_command), чтобы оба чата были
@@ -407,10 +434,11 @@ class TGSide:
             asyncio.create_task(self._tag_everyone(message))
 
         name = message.from_user.full_name
+        prefix = self.links.get_prefix("tg", message.from_user.id)
         try:
             await send_tg_message_to_vk(
                 self.bot, self.vk_api, self.cfg.vk_token, self.cfg.vk_user_token,
-                self.vk_group_id, vk_peer_id, name, message, self.links)
+                self.vk_group_id, vk_peer_id, name, message, self.links, prefix)
         except Exception:  # noqa: BLE001
             log.exception("TG->VK: ошибка доставки сообщения")
 
@@ -473,8 +501,9 @@ class TGSide:
         vk_cmid = self.links.vk_for_tg(message.chat.id, message.message_id)
         if not vk_cmid:
             return
+        prefix = self.links.get_prefix("tg", message.from_user.id)
         await edit_vk_from_tg(self.vk_api, vk_peer_id, vk_cmid,
-                              message.from_user.full_name, message.text)
+                              message.from_user.full_name, message.text, prefix)
 
     async def start(self) -> None:
         log.info("Telegram polling запущен (пар: %d, владельцев: %d)",

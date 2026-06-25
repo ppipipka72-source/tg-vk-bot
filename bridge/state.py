@@ -53,6 +53,15 @@ class LinkStore:
             "username TEXT, full_name TEXT, "
             "PRIMARY KEY (tg_chat_id, user_id))"
         )
+        # Персональные префиксы участников (команда /prefix). Ключ —
+        # (платформа, user_id): tg-пользователь и vk-пользователь независимы.
+        # Префикс подставляется перед именем в заголовке пересланного
+        # сообщения: «[VK] 🕋Ирина Седойкина:».
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS user_prefixes ("
+            "platform TEXT, user_id INTEGER, prefix TEXT, "
+            "PRIMARY KEY (platform, user_id))"
+        )
         # Сохранённые видео («альты», команда /alt). Альты — на каждый чат
         # (ключ — tg_chat_id, он же определяет VK-беседу через pairs).
         # Кросс-платформенная выдача: храним хэндл на КАЖДОЙ платформе —
@@ -244,6 +253,37 @@ class LinkStore:
             "DELETE FROM chat_members WHERE tg_chat_id=? AND user_id=?",
             (tg_chat_id, user_id))
         self._db.commit()
+
+    # --- персональные префиксы (/prefix) ------------------------------------
+
+    def set_prefix(self, platform: str, user_id: int, prefix: str) -> None:
+        """Задать префикс пользователю на платформе (tg/vk)."""
+        if not (platform and user_id):
+            return
+        self._db.execute(
+            "INSERT INTO user_prefixes(platform, user_id, prefix) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(platform, user_id) DO UPDATE SET prefix=excluded.prefix",
+            (platform, user_id, prefix))
+        self._db.commit()
+
+    def clear_prefix(self, platform: str, user_id: int) -> None:
+        """Убрать префикс пользователя."""
+        if not (platform and user_id):
+            return
+        self._db.execute(
+            "DELETE FROM user_prefixes WHERE platform=? AND user_id=?",
+            (platform, user_id))
+        self._db.commit()
+
+    def get_prefix(self, platform: str, user_id: int) -> str:
+        """Префикс пользователя (пустая строка, если не задан)."""
+        if not (platform and user_id):
+            return ""
+        row = self._db.execute(
+            "SELECT prefix FROM user_prefixes WHERE platform=? AND user_id=?",
+            (platform, user_id)).fetchone()
+        return (row[0] if row else "") or ""
 
     # --- сохранённые видео («альты», /alt) ----------------------------------
     # Сравнение имён регистронезависимое и работает с кириллицей, поэтому
