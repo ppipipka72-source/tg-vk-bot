@@ -163,6 +163,12 @@ class VKSide:
                     tg_chat_id, f"Сохранённые альты ({len(items)}):", items)
             return
 
+        if sub == "web":
+            await self.alts.broadcast_text(
+                tg_chat_id, "🌐 Веб-список альтов открывается в Telegram: "
+                "напиши там «/alt web».")
+            return
+
         if sub == "search":
             if not rest:
                 await self.alts.broadcast_text(tg_chat_id, "Что искать? «/alt search часть_имени»")

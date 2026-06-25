@@ -57,6 +57,25 @@ async def run() -> None:
 
     tasks = [vk.start(), tg.start()]
 
+    # Веб-приложение «альты» (Telegram Mini App, /alt web) — опционально.
+    # Включается, когда заданы WEBAPP_PUBLIC_URL и WEBAPP_BOT_APP (см. README).
+    if cfg.webapp_public_url and cfg.webapp_bot_app:
+        try:
+            me = await tg.bot.get_me()
+        except Exception:  # noqa: BLE001
+            me = None
+            log.exception("Не удалось получить username бота — /alt web выключен")
+        if me and me.username:
+            from .webapp import WebAppServer
+            web_server = WebAppServer(cfg, links, alts, me.username)
+            tg.webapp = web_server
+            tasks.append(web_server.start())
+            log.info("Веб-приложение альтов включено: %s (Mini App @%s/%s)",
+                     cfg.webapp_public_url, me.username, cfg.webapp_bot_app)
+    else:
+        log.info("Веб-приложение альтов выключено "
+                 "(нет WEBAPP_PUBLIC_URL / WEBAPP_BOT_APP)")
+
     # Discord-наблюдатель (опционально): голосовые каналы -> уведомления и /vc
     # в привязанные пары моста (Telegram + VK). Управление в TG: /ds_connect.
     if cfg.discord_token:

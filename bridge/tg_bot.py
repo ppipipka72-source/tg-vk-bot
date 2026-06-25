@@ -58,6 +58,7 @@ class TGSide:
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main
         self.discord = None  # DiscordSide, выставляется в main (если включён Discord)
         self.alts = None  # AltService, выставляется в main
+        self.webapp = None  # WebAppServer, выставляется в main (если включён /alt web)
 
         # Команды управления (только владельцы) — регистрируем ДО общего хендлера.
         self.dp.message(Command("link"))(self._cmd_link)
@@ -330,6 +331,21 @@ class TGSide:
             else:
                 await self.alts.broadcast_menu(
                     chat_id, f"Сохранённые альты ({len(items)}):", items)
+            return
+
+        if sub == "web":
+            if not self.webapp:
+                await self.alts.broadcast_text(
+                    chat_id, "Веб-список альтов сейчас не настроен на сервере.")
+                return
+            url = self.webapp.build_start_url(chat_id)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="🎬 Открыть список альтов", url=url)]])
+            await self.bot.send_message(
+                chat_id, "🌐 Веб-список альтов: поиск, фильтры по датам, превью "
+                "и отправка в чат одним тапом.", reply_markup=kb)
+            await self.alts.note_vk(
+                chat_id, "🌐 Веб-список альтов открывается в Telegram (/alt web там).")
             return
 
         if sub == "search":

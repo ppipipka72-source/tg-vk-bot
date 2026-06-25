@@ -76,14 +76,16 @@ class LinkStore:
             "origin TEXT, kind TEXT, "
             "tg_file_id TEXT, vk_attachment TEXT, "
             "src_chat_id INTEGER, src_msg_id INTEGER, "
-            "created_by INTEGER, created_at INTEGER)"
+            "created_by INTEGER, created_at INTEGER, "
+            "thumb TEXT)"
         )
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS i_alts_chat ON alts(tg_chat_id)"
         )
         # Миграция со старой схемы (без кросс-платформенных колонок и даты).
         have = {r[1] for r in self._db.execute("PRAGMA table_info(alts)").fetchall()}
-        for col in ("origin", "kind", "tg_file_id", "vk_attachment"):
+        # thumb — file_id миниатюры в TG / url превью в VK (для веб-списка /alt web).
+        for col in ("origin", "kind", "tg_file_id", "vk_attachment", "thumb"):
             if col not in have:
                 self._db.execute(f"ALTER TABLE alts ADD COLUMN {col} TEXT")
         if "created_at" not in have:
@@ -295,7 +297,7 @@ class LinkStore:
                 kind: str = "video", tg_file_id: str | None = None,
                 vk_attachment: str | None = None, src_chat_id: int | None = None,
                 src_msg_id: int | None = None, created_by: int = 0,
-                created_at: int | None = None) -> int | None:
+                created_at: int | None = None, thumb: str | None = None) -> int | None:
         """Сохранить альт. Возвращает id, либо None если имя в чате занято."""
         if self.get_alt(tg_chat_id, name) is not None:
             return None
@@ -303,10 +305,10 @@ class LinkStore:
             created_at = int(time.time())
         cur = self._db.execute(
             "INSERT INTO alts(tg_chat_id, name, origin, kind, tg_file_id, "
-            "vk_attachment, src_chat_id, src_msg_id, created_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "vk_attachment, src_chat_id, src_msg_id, created_by, created_at, thumb) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (tg_chat_id, name, origin, kind, tg_file_id, vk_attachment,
-             src_chat_id, src_msg_id, created_by, created_at))
+             src_chat_id, src_msg_id, created_by, created_at, thumb))
         self._db.commit()
         return cur.lastrowid
 
@@ -331,6 +333,23 @@ class LinkStore:
         return [(r["id"], r["name"] or "") for r in self._db.execute(
             "SELECT id, name FROM alts WHERE tg_chat_id=? ORDER BY rowid",
             (tg_chat_id,)).fetchall()]
+
+    def web_alts(self, tg_chat_id: int) -> list[sqlite3.Row]:
+        """Альты чата для веб-списка (/alt web): полные строки, новые сверху."""
+        return self._db.execute(
+            "SELECT id, name, origin, created_by, created_at, "
+            "       (thumb IS NOT NULL AND thumb<>'') AS has_thumb "
+            "FROM alts WHERE tg_chat_id=? ORDER BY created_at DESC, rowid DESC",
+            (tg_chat_id,)).fetchall()
+
+    def member_name(self, tg_chat_id: int, user_id: int) -> str | None:
+        """Имя участника TG-чата (из накопленных в chat_members), иначе None."""
+        row = self._db.execute(
+            "SELECT full_name, username FROM chat_members "
+            "WHERE tg_chat_id=? AND user_id=?", (tg_chat_id, user_id)).fetchone()
+        if not row:
+            return None
+        return row["full_name"] or row["username"] or None
 
     def search_alts(self, tg_chat_id: int, query: str) -> list[tuple[int, str]]:
         """Альты чата, чьё имя содержит query (регистронезависимо)."""

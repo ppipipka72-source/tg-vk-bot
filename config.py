@@ -50,6 +50,13 @@ class Config:
     # Команды управления (/ds_connect) и вывод (/vc, уведомления) идут через мост
     # (Telegram + VK), а не внутри Discord.
     discord_token: str = ""
+    # --- Веб-приложение «альты» (Telegram Mini App, /alt web) ---
+    # Включается, когда заданы И webapp_public_url, И webapp_bot_app. Mini App
+    # настраивается один раз в @BotFather (/newapp), его web app URL = webapp_public_url.
+    webapp_public_url: str = ""   # https://<домен> — корень страницы Mini App
+    webapp_bot_app: str = ""      # короткое имя Mini App из BotFather
+    webapp_host: str = "127.0.0.1"  # на каком интерфейсе слушает aiohttp (за Caddy)
+    webapp_port: int = 8090       # локальный порт aiohttp (Caddy проксирует на него)
 
 
 def load_config() -> Config:
@@ -66,4 +73,8 @@ def load_config() -> Config:
         tg_chat_id=int(os.getenv("TG_CHAT_ID") or 0),
         vk_peer_id=int(os.getenv("VK_PEER_ID") or 0),
         discord_token=os.getenv("DISCORD_TOKEN", ""),
+        webapp_public_url=os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/"),
+        webapp_bot_app=os.getenv("WEBAPP_BOT_APP", "").strip(),
+        webapp_host=os.getenv("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        webapp_port=int(os.getenv("WEBAPP_PORT") or 8090),
     )

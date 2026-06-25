@@ -150,6 +150,45 @@ python -m bridge.main
 4. В `.env` укажи `TG_API_URL=http://127.0.0.1:8081` и перезапусти бота.
    Флаг `TG_API_LOCAL=1` нужен только если сервер запущен с `--local`.
 
+## Веб-приложение «альты» (Telegram Mini App, `/alt web`)
+
+Команда **`/alt web`** присылает кнопку, открывающую мини-приложение Telegram со
+списком всех альтов чата: **поиск** по названию, **фильтры по датам**, **превью**
+(миниатюра видео), **аватарка и имя автора** (кто добавил альт через `/alt имя`).
+Тап по альту отправляет его в чат — так же, как кнопка в `/alt list` (видео уходит
+и в TG, и в парную VK-беседу). Превью и аватарки **не хранятся на диске**: байты
+подгружаются по запросу (по `file_id` миниатюры в TG / `url` превью в VK; аватар —
+`getUserProfilePhotos` или VK `photo_100`) и кешируются только в памяти с TTL.
+
+Фича опциональна и включается, когда заданы `WEBAPP_PUBLIC_URL` и `WEBAPP_BOT_APP`.
+Mini App требует **публичный HTTPS-URL с валидным сертификатом** (голый IP и
+self-signed не подходят). Доступ к данным чата защищён: в ссылку зашит подписанный
+(HMAC на токене бота) `tg_chat_id`, плюс на чтение/отправку проверяется подпись
+Telegram `initData`.
+
+Настройка (пример: бесплатный поддомен DuckDNS + Caddy + один порт):
+
+1. **Домен на сервер.** Заведи бесплатный поддомен (напр. на
+   <https://www.duckdns.org>) и направь его на IP сервера. Проверь, что
+   `alts.example.duckdns.org` резолвится в IP и порты 80/443 открыты.
+2. **HTTPS-прокси (Caddy).** Поставь Caddy (`apt install caddy`) и в `/etc/caddy/Caddyfile`:
+   ```
+   alts.example.duckdns.org {
+       reverse_proxy 127.0.0.1:8090
+   }
+   ```
+   `systemctl reload caddy` — Caddy сам выпустит и продлит сертификат Let's Encrypt.
+3. **Mini App в @BotFather.** `/newapp` → выбери бота → **Web App URL** =
+   `https://alts.example.duckdns.org/` → задай короткое имя (напр. `alts`).
+4. **`.env`** бота:
+   ```
+   WEBAPP_PUBLIC_URL=https://alts.example.duckdns.org
+   WEBAPP_BOT_APP=alts
+   WEBAPP_PORT=8090
+   ```
+   Перезапусти бота. В логах появится «Веб-приложение альтов включено …».
+   Теперь `/alt web` в любом чате моста открывает список.
+
 ## Ограничения
 
 - Без локального Bot API сервера (см. выше) Telegram скачивает/отдаёт файлы
@@ -170,4 +209,6 @@ bridge/state.py      пары чатов + связи id сообщений TG<-
 bridge/vk_upload.py  прямая загрузка фото/доков/голосовых в VK (community-токен)
 bridge/vk_user.py    нативное видео через user-токен (video.get / video.save)
 bridge/video_dl.py   скачивание видео по ссылке (yt-dlp): TikTok/Shorts/Reels
+bridge/alts.py       сохранённые видео («альты»): сохранение/выдача TG<->VK
+bridge/webapp.py     Mini App /alt web: список альтов, превью, отправка (aiohttp)
 ```

@@ -36,6 +36,7 @@ ALT_HELP = (
     "• ответь на видео «/alt название» — сохранить;\n"
     "• «/alt название» (без ответа) — прислать это видео;\n"
     "• «/alt list» — кнопки со всеми видео;\n"
+    "• «/alt web» — открыть веб-список с поиском, фильтрами и превью (Telegram);\n"
     "• «/alt search название» — найти; «/alt delete название» — удалить.\n"
     "Альты общие для Telegram и VK: всё видно на обеих платформах."
 )
@@ -129,6 +130,11 @@ class AltService:
         else:
             await self._tg_say(tg_chat_id, format_for_tg("VK", author, text), html=True)
 
+    async def note_vk(self, tg_chat_id, text) -> None:
+        """Сообщение только в парную VK-беседу (для TG-only фич, напр. /alt web)."""
+        vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
+        await self._vk_say(vk_peer, text)
+
     async def broadcast_text(self, tg_chat_id, text) -> None:
         """Простой ответ бота (без кнопок) — в оба чата."""
         vk_peer = self.links.vk_peer_for_tg_chat(tg_chat_id) if tg_chat_id else None
@@ -210,6 +216,26 @@ class AltService:
         return None
 
     @staticmethod
+    def tg_thumb(message) -> str | None:
+        """file_id миниатюры видео-вложения TG (для превью в /alt web), иначе None."""
+        for obj in (message.video, message.animation,
+                    message.video_note, message.document):
+            if obj is not None:
+                th = getattr(obj, "thumbnail", None)
+                return th.file_id if th else None
+        return None
+
+    @staticmethod
+    def vk_thumb(video) -> str | None:
+        """URL превью VK-видео (для /alt web): берём картинку покрупнее, иначе None."""
+        imgs = getattr(video, "image", None) or []
+        urls = [im for im in imgs if getattr(im, "url", None)]
+        if not urls:
+            return None
+        best = max(urls, key=lambda im: getattr(im, "width", 0) or 0)
+        return best.url
+
+    @staticmethod
     def vk_message_video(msg):
         """Объект видео из VK-сообщения (не кружок), иначе None."""
         if msg is None:
@@ -241,7 +267,7 @@ class AltService:
         alt_id = self.links.add_alt(
             tg_chat_id, name, origin="tg", kind=kind, tg_file_id=file_id,
             src_chat_id=reply_message.chat.id, src_msg_id=reply_message.message_id,
-            created_by=created_by)
+            created_by=created_by, thumb=self.tg_thumb(reply_message))
         if alt_id is None:
             return False, "dup"
         return True, None
@@ -277,7 +303,8 @@ class AltService:
 
         alt_id = self.links.add_alt(
             tg_chat_id, name, origin="vk", kind="video",
-            vk_attachment=attachment, created_by=created_by)
+            vk_attachment=attachment, created_by=created_by,
+            thumb=self.vk_thumb(video))
         if alt_id is None:
             return False, "dup"
         return True, None
