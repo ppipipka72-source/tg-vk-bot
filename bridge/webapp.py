@@ -342,6 +342,17 @@ _PAGE = r"""<!DOCTYPE html>
   input{width:100%;border:none;border-radius:10px;padding:11px 12px;font-size:15px;
         background:var(--sec);color:var(--text);outline:none}
   input::placeholder{color:var(--hint)}
+  .row1{display:flex;gap:8px;align-items:stretch}
+  .row1 input{flex:1;width:auto;min-width:0}
+  .sortbtn{flex:none;border:none;border-radius:10px;padding:0 14px;font-size:13px;
+           font-weight:600;background:var(--btn);color:var(--btn-text);
+           cursor:pointer;white-space:nowrap}
+  .sortbtn:active{opacity:.8}
+  .row2{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
+  .row2 .dates{flex:1;margin-top:0}
+  .authsel{flex:none;width:130px;max-width:42vw;border:none;border-radius:10px;
+           padding:10px 8px;font-size:13px;background:var(--sec);color:var(--text);
+           outline:none;cursor:pointer}
   .dates{display:flex;gap:8px;margin-top:8px}
   .dates label{flex:1;font-size:11px;color:var(--hint)}
   .dates input{margin-top:3px}
@@ -372,10 +383,18 @@ _PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
   <div class="filters">
-    <input id="q" type="text" placeholder="🔍 Поиск по названию…">
-    <div class="dates">
-      <label>С даты<input id="from" type="date"></label>
-      <label>По дату<input id="to" type="date"></label>
+    <div class="row1">
+      <input id="q" type="text" placeholder="🔍 Поиск по названию…">
+      <button id="sort" type="button" class="sortbtn" title="Сортировка по дате">↓ новые</button>
+    </div>
+    <div class="row2">
+      <div class="dates">
+        <label>С даты<input id="from" type="date"></label>
+        <label>По дату<input id="to" type="date"></label>
+      </div>
+      <select id="author" class="authsel" title="Фильтр по автору">
+        <option value="">Все авторы</option>
+      </select>
     </div>
   </div>
   <div class="count" id="count"></div>
@@ -395,8 +414,11 @@ const countEl = document.getElementById("count");
 const qEl = document.getElementById("q");
 const fromEl = document.getElementById("from");
 const toEl = document.getElementById("to");
+const sortEl = document.getElementById("sort");
+const authorEl = document.getElementById("author");
 const toastEl = document.getElementById("toast");
 let ALTS = [];
+let sortDesc = true;   // true: сначала новые, false: сначала старые
 
 function toast(msg, ok=true){
   toastEl.textContent = msg;
@@ -411,16 +433,35 @@ function fmtDate(ts){
 }
 function initial(name){ return (name||"?").trim().charAt(0).toUpperCase() || "?"; }
 
+function populateAuthors(){
+  const names = [...new Set(ALTS.map(a=>a.author).filter(Boolean))]
+                  .sort((a,b)=>a.localeCompare(b,"ru"));
+  const hasNone = ALTS.some(a=>!a.author);
+  const cur = authorEl.value;
+  authorEl.innerHTML = "";
+  const add=(val,label)=>{const o=document.createElement("option");
+    o.value=val; o.textContent=label; authorEl.appendChild(o);};
+  add("", "Все авторы");
+  names.forEach(n=>add(n, n));
+  if(hasNone) add("__none__", "Без автора");
+  if([...authorEl.options].some(o=>o.value===cur)) authorEl.value = cur;
+}
+
 function render(){
   const q = qEl.value.trim().toLowerCase();
   const from = fromEl.value ? new Date(fromEl.value).getTime()/1000 : null;
   const to = toEl.value ? (new Date(toEl.value).getTime()/1000 + 86399) : null;
+  const author = authorEl.value;
   const items = ALTS.filter(a=>{
     if(q && !(a.name||"").toLowerCase().includes(q)) return false;
     if(from!==null && (a.created_at||0) < from) return false;
     if(to!==null && (a.created_at||0) > to) return false;
+    if(author==="__none__"){ if(a.author) return false; }
+    else if(author){ if((a.author||"")!==author) return false; }
     return true;
   });
+  items.sort((x,y)=> sortDesc ? (y.created_at||0)-(x.created_at||0)
+                              : (x.created_at||0)-(y.created_at||0));
   listEl.innerHTML = "";
   countEl.textContent = items.length ? ("Найдено: " + items.length) : "";
   emptyEl.style.display = (ALTS.length===0 || items.length===0) ? "block" : "none";
@@ -502,13 +543,20 @@ async function load(){
     if(!r.ok){ emptyEl.style.display="block"; emptyEl.textContent="Нет доступа."; return; }
     const j = await r.json();
     ALTS = j.alts || [];
+    populateAuthors();
     render();
   }catch(e){ emptyEl.style.display="block"; emptyEl.textContent="Ошибка загрузки."; }
 }
 
+sortEl.onclick = ()=>{
+  sortDesc = !sortDesc;
+  sortEl.textContent = sortDesc ? "↓ новые" : "↑ старые";
+  render();
+};
 qEl.addEventListener("input", render);
 fromEl.addEventListener("change", render);
 toEl.addEventListener("change", render);
+authorEl.addEventListener("change", render);
 load();
 </script>
 </body>
