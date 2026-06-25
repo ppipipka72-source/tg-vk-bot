@@ -348,14 +348,10 @@ _PAGE = r"""<!DOCTYPE html>
            font-weight:600;background:var(--btn);color:var(--btn-text);
            cursor:pointer;white-space:nowrap}
   .sortbtn:active{opacity:.8}
-  .row2{display:flex;gap:8px;align-items:flex-end;margin-top:8px}
-  .row2 .dates{flex:1;margin-top:0}
-  .authsel{flex:none;width:130px;max-width:42vw;border:none;border-radius:10px;
+  .row2{display:flex;justify-content:flex-end;margin-top:8px}
+  .authsel{flex:none;width:160px;max-width:60vw;border:none;border-radius:10px;
            padding:10px 8px;font-size:13px;background:var(--sec);color:var(--text);
            outline:none;cursor:pointer}
-  .dates{display:flex;gap:8px;margin-top:8px}
-  .dates label{flex:1;font-size:11px;color:var(--hint)}
-  .dates input{margin-top:3px}
   .count{font-size:12px;color:var(--hint);margin:10px 2px 6px}
   .list{display:flex;flex-direction:column;gap:8px}
   .card{display:flex;align-items:center;gap:10px;background:var(--sec);
@@ -388,10 +384,6 @@ _PAGE = r"""<!DOCTYPE html>
       <button id="sort" type="button" class="sortbtn" title="Сортировка по дате">↓ новые</button>
     </div>
     <div class="row2">
-      <div class="dates">
-        <label>С даты<input id="from" type="date"></label>
-        <label>По дату<input id="to" type="date"></label>
-      </div>
       <select id="author" class="authsel" title="Фильтр по автору">
         <option value="">Все авторы</option>
       </select>
@@ -412,8 +404,6 @@ const listEl = document.getElementById("list");
 const emptyEl = document.getElementById("empty");
 const countEl = document.getElementById("count");
 const qEl = document.getElementById("q");
-const fromEl = document.getElementById("from");
-const toEl = document.getElementById("to");
 const sortEl = document.getElementById("sort");
 const authorEl = document.getElementById("author");
 const toastEl = document.getElementById("toast");
@@ -449,13 +439,9 @@ function populateAuthors(){
 
 function render(){
   const q = qEl.value.trim().toLowerCase();
-  const from = fromEl.value ? new Date(fromEl.value).getTime()/1000 : null;
-  const to = toEl.value ? (new Date(toEl.value).getTime()/1000 + 86399) : null;
   const author = authorEl.value;
   const items = ALTS.filter(a=>{
     if(q && !(a.name||"").toLowerCase().includes(q)) return false;
-    if(from!==null && (a.created_at||0) < from) return false;
-    if(to!==null && (a.created_at||0) > to) return false;
     if(author==="__none__"){ if(a.author) return false; }
     else if(author){ if((a.author||"")!==author) return false; }
     return true;
@@ -554,8 +540,6 @@ sortEl.onclick = ()=>{
   render();
 };
 qEl.addEventListener("input", render);
-fromEl.addEventListener("change", render);
-toEl.addEventListener("change", render);
 authorEl.addEventListener("change", render);
 load();
 </script>
