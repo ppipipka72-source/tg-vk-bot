@@ -1,17 +1,23 @@
-"""Распознавание речи голосовых сообщений (offline, Vosk).
+"""Распознавание речи голосовых сообщений (offline, faster-whisper).
 
-Голосовое (ogg/opus из VK или TG) декодируется через ffmpeg в PCM 16 кГц моно и
-скармливается модели Vosk. Модель грузится лениво один раз и кэшируется в памяти
-(~200 МБ). Если vosk не установлен, модель не найдена или нет ffmpeg — фича
-просто отключается (transcribe_voice вернёт None), мост продолжает работать.
+Голосовое (ogg/opus из VK или TG) декодируется через ffmpeg в PCM 16 кГц моно,
+переводится в float32 [-1, 1] и распознаётся моделью faster-whisper (бэкенд
+CTranslate2, int8 на CPU — без torch, заметно точнее на русском, чем Vosk).
+Модель грузится лениво один раз и кэшируется в памяти. Если faster-whisper не
+установлен или нет ffmpeg — фича просто отключается (transcribe_voice вернёт
+None), мост продолжает работать.
 
-Путь к модели: переменная окружения VOSK_MODEL_PATH (по умолчанию папка
-`vosk-model` в корне проекта). Модель: https://alphacephei.com/vosk/models
-(для русского — vosk-model-small-ru, ~45 МБ).
+Конфиг (переменные окружения):
+  WHISPER_MODEL   — размер модели или путь к локальной CT2-папке. По умолчанию
+                    "small". Имя размера (tiny/base/small/medium) скачается с
+                    HuggingFace и закэшируется (~/.cache/huggingface). Для офлайна
+                    укажи путь к уже распакованной CT2-модели.
+  WHISPER_COMPUTE — тип вычислений CTranslate2 (по умолч. "int8" — самый лёгкий).
+  WHISPER_LANG    — язык распознавания (по умолч. "ru"). Пусто/"auto" — автоопределение.
+  FFMPEG_BIN      — путь к ffmpeg, если его нет в PATH.
 """
 
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -20,22 +26,16 @@ import threading
 
 log = logging.getLogger(__name__)
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DEFAULT_MODEL = os.path.join(_PROJECT_ROOT, "vosk-model")
-
 _SAMPLE_RATE = 16000
-# Декодируем и распознаём кусками — так Vosk отдаёт промежуточные результаты и
-# не держит весь PCM длинного голосового в одном вызове.
-_CHUNK = 32000  # байт PCM (~1 c при 16 кГц/16 бит моно)
 
-# _state: None — ещё не пробовали загрузить; False — отключено (нет модели/либы);
-# иначе — загруженный объект vosk.Model. Защищено _lock от гонки потоков.
+# _state: None — ещё не пробовали загрузить; False — отключено (нет либы/модели);
+# иначе — загруженный faster_whisper.WhisperModel. Защищено _lock от гонки потоков.
 _state = None
 _lock = threading.Lock()
 
 
 def _get_model():
-    """Лениво загрузить модель Vosk. None — фича недоступна (тихо отключена)."""
+    """Лениво загрузить модель faster-whisper. None — фича недоступна (тихо выкл.)."""
     global _state
     if _state is not None:
         return _state or None
@@ -43,24 +43,19 @@ def _get_model():
         if _state is not None:
             return _state or None
         try:
-            from vosk import Model, SetLogLevel
+            from faster_whisper import WhisperModel
         except ImportError:
-            log.warning("STT: библиотека vosk не установлена — расшифровка "
-                        "голосовых отключена (pip install vosk)")
+            log.warning("STT: библиотека faster-whisper не установлена — расшифровка "
+                        "голосовых отключена (pip install faster-whisper)")
             _state = False
             return None
-        path = os.getenv("VOSK_MODEL_PATH", "").strip() or _DEFAULT_MODEL
-        if not os.path.isdir(path):
-            log.warning("STT: модель Vosk не найдена (%s) — расшифровка отключена. "
-                        "Скачай модель и укажи VOSK_MODEL_PATH.", path)
-            _state = False
-            return None
+        name = os.getenv("WHISPER_MODEL", "").strip() or "small"
+        compute = os.getenv("WHISPER_COMPUTE", "").strip() or "int8"
         try:
-            SetLogLevel(-1)  # заглушить болтливый лог Kaldi
-            _state = Model(path)
-            log.info("STT: модель Vosk загружена (%s)", path)
+            _state = WhisperModel(name, device="cpu", compute_type=compute)
+            log.info("STT: модель faster-whisper загружена (%s, %s)", name, compute)
         except Exception:  # noqa: BLE001
-            log.exception("STT: не удалось загрузить модель Vosk")
+            log.exception("STT: не удалось загрузить модель faster-whisper (%s)", name)
             _state = False
             return None
     return _state or None
@@ -94,23 +89,26 @@ def _transcribe_sync(data: bytes) -> str | None:
     pcm = _decode_to_pcm(data)
     if not pcm:
         return None
-    from vosk import KaldiRecognizer
+    import numpy as np
 
-    rec = KaldiRecognizer(model, _SAMPLE_RATE)
-    parts: list[str] = []
-    for i in range(0, len(pcm), _CHUNK):
-        if rec.AcceptWaveform(pcm[i:i + _CHUNK]):
-            parts.append(json.loads(rec.Result()).get("text", ""))
-    parts.append(json.loads(rec.FinalResult()).get("text", ""))
-    text = " ".join(p for p in parts if p).strip()
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    lang = os.getenv("WHISPER_LANG", "").strip() or "ru"
+    if lang.lower() == "auto":
+        lang = None
+    # beam_size=1 — быстрее на CPU; vad_filter режет тишину; condition_on_previous
+    # _text=False гасит зацикленные «галлюцинации» на коротких голосовых.
+    segments, _info = model.transcribe(
+        audio, language=lang, beam_size=1, vad_filter=True,
+        condition_on_previous_text=False)
+    text = " ".join(s.text.strip() for s in segments).strip()
     return text or None
 
 
 async def transcribe_voice(data: bytes | None) -> str | None:
     """Распознать речь в голосовом (байты ogg/mp3). None — нет текста/фича выкл.
 
-    Тяжёлая часть (ffmpeg + Vosk) блокирующая — выносим в пул потоков, чтобы не
-    тормозить мост.
+    Тяжёлая часть (ffmpeg + faster-whisper) блокирующая — выносим в пул потоков,
+    чтобы не тормозить мост.
     """
     if not data:
         return None

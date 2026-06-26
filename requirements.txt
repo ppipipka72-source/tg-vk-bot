@@ -6,7 +6,8 @@ Pillow>=10.0
 certifi>=2023.0
 yt-dlp>=2024.0
 discord.py>=2.4,<3
-# Распознавание речи голосовых (offline). Нужны ещё ffmpeg (системный) и модель
-# Vosk (см. .env.example, VOSK_MODEL_PATH). Если не установлено — фича просто
-# отключается, мост работает.
-vosk>=0.3.45
+# Распознавание речи голосовых (offline, faster-whisper — CTranslate2, без torch).
+# Нужен ещё системный ffmpeg. Модель скачивается автоматически по имени размера
+# (WHISPER_MODEL, см. .env.example). Если не установлено — фича отключается,
+# мост работает. Тянет за собой ctranslate2/onnxruntime/av/numpy.
+faster-whisper>=1.0
