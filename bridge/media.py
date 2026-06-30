@@ -200,6 +200,7 @@ def _cmid_from_send(resp):
     return None
 
 
+
 async def edit_vk_from_tg(vk_api, peer_id, vk_cmid, name, body, prefix: str = "") -> None:
     """Применить правку TG-сообщения к связанному VK-сообщению (только текст).
 
