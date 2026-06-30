@@ -15,7 +15,6 @@ import random
 import aiohttp
 from aiogram import Bot as TgBot
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.types import BufferedInputFile, LinkPreviewOptions, ReplyParameters
 from PIL import Image
 
@@ -348,16 +347,7 @@ async def _send_vk_fwd_messages(tg_bot, vk_user_token, chat_id, fwd_messages,
 
 
 async def _tg_send(tg_bot, method_name, chat_id, reply_to, *args, **kwargs):
-    """Вызвать метод отправки TG с reply.
-
-    Повтор без reply делаем ТОЛЬКО при TelegramBadRequest — это отказ самого
-    Telegram (400), значит сообщение точно не ушло, повтор не создаст дубль.
-    На сетевой ошибке (таймаут/обрыв) НЕ перезапускаем отправку: при заливке
-    крупного видео (YouTube) канал забит, ответ TG может прийти позже таймаута,
-    хотя сообщение уже доставлено — повтор тогда дал бы дубль (у TG нет
-    идемпотентности, в отличие от random_id у VK). Возвращаем None: вызывающий
-    код трактует это как «не отправилось» и просто не строит reply-связь.
-    """
+    """Вызвать метод отправки TG с reply; при ошибке reply — без него."""
     method = getattr(tg_bot, method_name)
     if reply_to:
         try:
@@ -365,13 +355,8 @@ async def _tg_send(tg_bot, method_name, chat_id, reply_to, *args, **kwargs):
                                 reply_parameters=ReplyParameters(
                                     message_id=reply_to, allow_sending_without_reply=True),
                                 **kwargs)
-        except TelegramBadRequest:
-            log.warning("TG: reply на %s отвергнут (400), шлю без reply", reply_to)
-            # упадём в обычную отправку ниже — первая попытка точно не доставлена
-        except TelegramNetworkError:
-            log.warning("TG: сетевой сбой при ответе на %s — не дублирую отправку",
-                        reply_to)
-            return None
+        except Exception:  # noqa: BLE001
+            log.warning("TG: не удалось ответить на %s, шлю без reply", reply_to)
     return await method(chat_id, *args, **kwargs)
 
 
@@ -628,16 +613,13 @@ async def relay_voice_transcript(tg_bot, vk_api, *, tg_chat_id, tg_reply_to,
             forward = json.dumps({"peer_id": vk_peer_id,
                                   "conversation_message_ids": [vk_reply_cmid],
                                   "is_reply": True})
-            # Один random_id на обе попытки: если первая дошла, но ответ
-            # затерялся, VK по тому же random_id не отправит дубль.
-            rid = _random_id()
             try:
                 await vk_api.messages.send(peer_id=vk_peer_id, message=label,
-                                           random_id=rid, forward=forward)
+                                           random_id=_random_id(), forward=forward)
             except Exception:  # noqa: BLE001 — reply мог не пройти -> без него
                 log.exception("STT: VK reply (cmid=%s) не прошёл, шлю без reply",
                               vk_reply_cmid)
                 await vk_api.messages.send(peer_id=vk_peer_id, message=label,
-                                           random_id=rid)
+                                           random_id=_random_id())
     except Exception:  # noqa: BLE001
         log.exception("STT: ошибка расшифровки голосового")
