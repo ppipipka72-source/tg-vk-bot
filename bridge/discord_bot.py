@@ -124,8 +124,7 @@ class DiscordSide:
         self._since: dict[int, float] = {}
         # Схлопывание флуда голосовых событий (по пользователю). Отключаемо.
         self.flood = (
-            VoiceFloodAggregator(self, keep=cfg.discord_flood_keep,
-                                 silence=cfg.discord_flood_silence)
+            VoiceFloodAggregator(self, silence=cfg.discord_flood_silence)
             if cfg.discord_flood_collapse else None
         )
         self._register()
@@ -192,15 +191,18 @@ class DiscordSide:
             text = (f"🔊 {nm} зашёл в «{cn}». Сейчас в канале: {n}. "
                     f"Напишите /vc для полного списка.")
             line = f"🔊 зашёл в «{cn}» — {n} в канале"
+            here = True
         elif kind == "leave":
             text = f"👋 {nm} вышел из «{cn}». Осталось в канале: {n}."
             line = f"👋 вышел из «{cn}» — осталось {n}"
+            here = False
         else:  # move
             text = f"🔁 {nm}: «{src.name}» → «{cn}». Сейчас в «{cn}»: {n}."
             line = f"🔁 «{src.name}» → «{cn}» — {n} в канале"
+            here = True
         for tg_chat_id in chats:
             if self.flood is not None:
-                await self.flood.add(tg_chat_id, member.id, nm, text, line, cn, n)
+                await self.flood.add(tg_chat_id, member.id, nm, line, cn, n, here)
             else:
                 await deliver_text(self.tg_bot, self.vk_api, self.vk_token,
                                    self.links, tg_chat_id, text)

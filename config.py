@@ -50,12 +50,10 @@ class Config:
     # Команды управления (/ds_connect) и вывод (/vc, уведомления) идут через мост
     # (Telegram + VK), а не внутри Discord.
     discord_token: str = ""
-    # Схлопывание флуда голосовых событий (по пользователю). Первые
-    # discord_flood_keep событий идут обычными сообщениями; при превышении
-    # они удаляются и заменяются одним живым сообщением со свёрнутой цитатой,
-    # которое дописывается, пока не наступит discord_flood_silence секунд тишины.
+    # Схлопывание флуда голосовых событий (по пользователю): с первого события
+    # заводится одно живое сообщение со свёрнутой цитатой, куда дописываются все
+    # действия человека, пока не наступит discord_flood_silence секунд тишины.
     discord_flood_collapse: bool = True
-    discord_flood_keep: int = 2
     discord_flood_silence: float = 60.0
     # --- Веб-приложение «альты» (Telegram Mini App, /alt web) ---
     # Включается, когда заданы И webapp_public_url, И webapp_bot_app. Mini App
@@ -82,7 +80,6 @@ def load_config() -> Config:
         discord_token=os.getenv("DISCORD_TOKEN", ""),
         discord_flood_collapse=(os.getenv("DISCORD_FLOOD_COLLAPSE", "1") or "1")
         .strip().lower() in ("1", "true", "yes", "on"),
-        discord_flood_keep=int(os.getenv("DISCORD_FLOOD_KEEP") or 2),
         discord_flood_silence=float(os.getenv("DISCORD_FLOOD_SILENCE") or 60),
         webapp_public_url=os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/"),
         webapp_bot_app=os.getenv("WEBAPP_BOT_APP", "").strip(),

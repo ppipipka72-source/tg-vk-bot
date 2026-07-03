@@ -1,16 +1,16 @@
 """Схлопывание флуда голосовых событий Discord в живое сообщение.
 
 Проблема: когда пара человек скачет по войсам, чат заваливает десятками
-строк «зашёл/вышел/перешёл». Здесь события группируются ПО ПОЛЬЗОВАТЕЛЮ:
-первые `keep` событий идут обычными сообщениями (как раньше, без регрессии
-для спокойного чата). Но если один и тот же человек за короткое окно нашумел
-сверх порога — его отдельные сообщения удаляются, а вместо них поднимается
-одно живое сообщение со свёрнутой цитатой (Telegram expandable blockquote),
-куда дописываются все дальнейшие его действия.
+строк «зашёл/вышел/перешёл». Здесь события группируются ПО ПОЛЬЗОВАТЕЛЮ: с
+первого же события заводится ОДНО живое сообщение со свёрнутой цитатой
+(Telegram expandable blockquote), в заголовке — где человек сейчас, в цитате —
+все его действия. Каждое следующее событие дописывается в ту же цитату.
 
 Окно скользящее: закрывается после `silence` секунд тишины (по этому
-пользователю), дальше начинается новое сообщение. Правки живого сообщения
-дебаунсятся (edit_debounce), чтобы не упереться во флуд-лимиты Telegram.
+пользователю), дальше следующее событие заведёт новое сообщение. Правки живого
+сообщения дебаунсятся (edit_debounce), чтобы не упереться во флуд-лимиты
+Telegram. Удалять ничего не нужно — сообщение изначально одно, поэтому и прав
+администратора на удаление в TG не требуется.
 
 VK свёрнутых цитат не умеет — там то же сообщение просто редактируется
 растущим списком (длинный текст VK сам прячет под «показать полностью»).
@@ -20,7 +20,7 @@ import asyncio
 import html
 import logging
 
-from .discord_relay import delete_pair, edit_pair, send_pair
+from .discord_relay import edit_pair, send_pair
 
 log = logging.getLogger("discord_flood")
 
@@ -29,18 +29,18 @@ _MAX_LINES = 40
 
 
 class _Stream:
-    """Состояние агрегации по одному пользователю в одном чате."""
+    """Состояние живого сообщения по одному пользователю в одном чате."""
 
-    __slots__ = ("chat_id", "name", "lines", "channel", "count",
-                 "plain", "agg", "lock", "close_task", "edit_task")
+    __slots__ = ("chat_id", "name", "lines", "channel", "count", "here",
+                 "agg", "lock", "close_task", "edit_task")
 
     def __init__(self, chat_id: int, name: str) -> None:
         self.chat_id = chat_id
         self.name = name
-        self.lines: list[str] = []   # компактные строки для цитаты
+        self.lines: list[str] = []   # компактные строки действий для цитаты
         self.channel = ""            # где пользователь сейчас
         self.count = 0               # людей в текущем канале
-        self.plain: list[dict] = []  # хэндлы одиночных сообщений (до схлопывания)
+        self.here = True             # в войсе (True) или уже вышел (False)
         self.agg: dict | None = None  # хэндл живого сообщения
         self.lock = asyncio.Lock()
         self.close_task: asyncio.Task | None = None
@@ -48,20 +48,19 @@ class _Stream:
 
 
 class VoiceFloodAggregator:
-    def __init__(self, side, *, keep: int = 2, silence: float = 60.0,
+    def __init__(self, side, *, silence: float = 60.0,
                  edit_debounce: float = 1.2) -> None:
         self.side = side                 # DiscordSide: читаем tg_bot/vk_api/links лениво
-        self.keep = max(0, keep)
         self.silence = silence
         self.edit_debounce = edit_debounce
         self._streams: dict[tuple[int, int], _Stream] = {}
 
     async def add(self, tg_chat_id: int, member_id: int, name: str,
-                  full_text: str, line: str, channel_name: str, count: int) -> None:
+                  line: str, channel_name: str, count: int, here: bool) -> None:
         """Обработать одно голосовое событие пользователя.
 
-        full_text — точный текст обычного (несхлопнутого) сообщения, как раньше.
-        line — компактная строка для цитаты живого сообщения (без имени).
+        line — компактная строка для цитаты (без имени: имя в заголовке).
+        here — остался ли пользователь в войсе (False для выхода).
         """
         key = (tg_chat_id, member_id)
         while True:
@@ -76,24 +75,15 @@ class VoiceFloodAggregator:
                 st.name = name
                 st.channel = channel_name
                 st.count = count
+                st.here = here
                 st.lines.append(line)
                 self._arm_close(key, st)
 
-                n = len(st.lines)
-                if st.agg is None and n <= self.keep:
-                    # Спокойный режим: обычное сообщение, как прежде.
-                    h = await send_pair(self.side, tg_chat_id, full_text, full_text)
-                    st.plain.append(h)
-                elif st.agg is None:
-                    # Порог превышен — сносим одиночные, поднимаем живое сообщение.
-                    for h in st.plain:
-                        await delete_pair(self.side, h)
-                    st.plain.clear()
+                if st.agg is None:
                     tg_text, vk_text = self._render(st)
                     st.agg = await send_pair(self.side, tg_chat_id, tg_text,
                                              vk_text, tg_html=True)
                 else:
-                    # Живое сообщение уже есть — дебаунсим правку.
                     self._arm_edit(key, st)
                 return
 
@@ -103,13 +93,12 @@ class VoiceFloodAggregator:
         hidden = len(st.lines) - len(shown)
         note = f"…ещё {hidden} действий выше\n" if hidden else ""
 
-        head_tg = (f"🎧 <b>{html.escape(st.name)}</b> — сейчас в "
-                   f"«{html.escape(st.channel)}» ({st.count})")
+        where = f"сейчас в «{st.channel}» ({st.count})" if st.here else "вышел из войсов"
+        head_tg = f"🎧 <b>{html.escape(st.name)}</b> — {html.escape(where)}"
         body_tg = html.escape(note + "\n".join(shown))
         tg = f"{head_tg}\n<blockquote expandable>{body_tg}</blockquote>"
 
-        head_vk = f"🎧 {st.name} — сейчас в «{st.channel}» ({st.count})"
-        vk = f"{head_vk}\n{note}" + "\n".join(shown)
+        vk = f"🎧 {st.name} — {where}\n{note}" + "\n".join(shown)
         return tg, vk
 
     # ---------- таймер тишины (закрытие окна) ----------
