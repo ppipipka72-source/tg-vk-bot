@@ -124,7 +124,8 @@ class DiscordSide:
         self._since: dict[int, float] = {}
         # Схлопывание флуда голосовых событий (по пользователю). Отключаемо.
         self.flood = (
-            VoiceFloodAggregator(self, silence=cfg.discord_flood_silence)
+            VoiceFloodAggregator(self, threshold=cfg.discord_flood_msgs,
+                                 max_age=cfg.discord_flood_max_age)
             if cfg.discord_flood_collapse else None
         )
         self._register()

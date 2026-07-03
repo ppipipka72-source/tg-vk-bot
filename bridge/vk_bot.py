@@ -70,6 +70,12 @@ class VKSide:
         if message.from_id is None or message.from_id < 0:
             return
 
+        # Живое сообщение флуда голосовых закрываем, когда люди пишут в чат:
+        # это человеческое сообщение «отодвигает» уведомление вверх.
+        if self.discord is not None and self.discord.flood is not None:
+            asyncio.create_task(
+                self.discord.flood.note_human_message(tg_chat_id))
+
         # Команда /vc — кто в голосовых Discord (вывод в оба чата). Не пересылаем.
         if (message.text or "").strip().lower() == "/vc":
             await self._handle_vc(message.peer_id, tg_chat_id)

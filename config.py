@@ -52,9 +52,14 @@ class Config:
     discord_token: str = ""
     # Схлопывание флуда голосовых событий (по пользователю): с первого события
     # заводится одно живое сообщение со свёрнутой цитатой, куда дописываются все
-    # действия человека, пока не наступит discord_flood_silence секунд тишины.
+    # действия человека. Окно закрывается НЕ по таймеру тишины, а когда люди
+    # напишут в чат discord_flood_msgs сообщений (старое сообщение «уехало»
+    # вверх — править его бессмысленно, следующее событие пишет новое). Пока в
+    # чате тихо — сообщение обновляется сколько угодно, вплоть до страховочного
+    # предела discord_flood_max_age секунд (чуть меньше лимита правок VK — 24ч).
     discord_flood_collapse: bool = True
-    discord_flood_silence: float = 60.0
+    discord_flood_msgs: int = 5
+    discord_flood_max_age: float = 82800.0  # 23ч — ниже лимита правок VK (24ч)
     # --- Веб-приложение «альты» (Telegram Mini App, /alt web) ---
     # Включается, когда заданы И webapp_public_url, И webapp_bot_app. Mini App
     # настраивается один раз в @BotFather (/newapp), его web app URL = webapp_public_url.
@@ -80,7 +85,8 @@ def load_config() -> Config:
         discord_token=os.getenv("DISCORD_TOKEN", ""),
         discord_flood_collapse=(os.getenv("DISCORD_FLOOD_COLLAPSE", "1") or "1")
         .strip().lower() in ("1", "true", "yes", "on"),
-        discord_flood_silence=float(os.getenv("DISCORD_FLOOD_SILENCE") or 60),
+        discord_flood_msgs=int(os.getenv("DISCORD_FLOOD_MSGS") or 5),
+        discord_flood_max_age=float(os.getenv("DISCORD_FLOOD_MAX_AGE") or 82800),
         webapp_public_url=os.getenv("WEBAPP_PUBLIC_URL", "").strip().rstrip("/"),
         webapp_bot_app=os.getenv("WEBAPP_BOT_APP", "").strip(),
         webapp_host=os.getenv("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1",

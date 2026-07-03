@@ -441,6 +441,12 @@ class TGSide:
                                 message.from_user.username,
                                 message.from_user.full_name)
 
+        # Живое сообщение флуда голосовых закрываем, когда люди пишут в чат:
+        # это человеческое сообщение «отодвигает» уведомление вверх.
+        if self.discord is not None and self.discord.flood is not None:
+            asyncio.create_task(
+                self.discord.flood.note_human_message(message.chat.id))
+
         # @all — тегаем всех известных участников ОТДЕЛЬНЫМ сообщением бота.
         # Оно не попадает в VK: бот не получает свои же апдейты, а ниже мы
         # его и не релеим. Само сообщение пользователя с «@all» уходит в VK
