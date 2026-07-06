@@ -6,6 +6,9 @@ Pillow>=10.0
 certifi>=2023.0
 yt-dlp>=2024.0
 discord.py>=2.4,<3
+# Instagram-наблюдатель: логин по sessionid-cookie + опрос директа (личный API).
+# Если не установлено — фича /instagram отключается, мост работает как обычно.
+instagrapi>=2.1,<3
 # Распознавание речи голосовых (offline, faster-whisper — CTranslate2, без torch).
 # Нужен ещё системный ffmpeg. Модель скачивается автоматически по имени размера
 # (WHISPER_MODEL, см. .env.example). Если не установлено — фича отключается,

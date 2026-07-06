@@ -45,6 +45,20 @@ class LinkStore:
             "guild_id INTEGER, tg_chat_id INTEGER, title TEXT, "
             "PRIMARY KEY (guild_id, tg_chat_id))"
         )
+        # Пул Instagram-аккаунтов (личных): cookies — JSON {"sessionid","settings"}.
+        # last_seen_ts — курсор опроса директа (мс), чтобы не пересылать историю.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS ig_accounts ("
+            "ig_user_id INTEGER PRIMARY KEY, username TEXT, "
+            "cookies TEXT, last_seen_ts INTEGER DEFAULT 0, added_at INTEGER)"
+        )
+        # Привязка Instagram-аккаунт -> TG-чат (VK-беседа берётся из pairs).
+        # Один аккаунт обслуживает один чат (PRIMARY KEY на ig_user_id); «свободный»
+        # аккаунт = тот, которого здесь нет. У чата может быть несколько аккаунтов.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS ig_bindings ("
+            "ig_user_id INTEGER PRIMARY KEY, tg_chat_id INTEGER, title TEXT)"
+        )
         # Участники TG-чатов (для @all): Bot API не умеет перечислять всех
         # участников, поэтому копим тех, кто писал в чат.
         self._db.execute(
@@ -227,6 +241,73 @@ class LinkStore:
         return [r[0] for r in self._db.execute(
             "SELECT tg_chat_id FROM ds_bindings WHERE guild_id=?",
             (guild_id,)).fetchall()]
+
+    # --- Instagram: пул аккаунтов и привязки --------------------------------
+
+    def add_ig_account(self, ig_user_id: int, username: str, cookies: str) -> None:
+        """Добавить/обновить аккаунт в пуле (по свежим cookie сбрасываем курсор
+        только при первом появлении — обновление cookie курс не трогает)."""
+        self._db.execute(
+            "INSERT INTO ig_accounts(ig_user_id, username, cookies, last_seen_ts, added_at) "
+            "VALUES (?, ?, ?, 0, ?) "
+            "ON CONFLICT(ig_user_id) DO UPDATE SET "
+            "username=excluded.username, cookies=excluded.cookies",
+            (ig_user_id, username, cookies, int(time.time())))
+        self._db.commit()
+
+    def remove_ig_account(self, ig_user_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM ig_accounts WHERE ig_user_id=?", (ig_user_id,))
+        self._db.execute("DELETE FROM ig_bindings WHERE ig_user_id=?", (ig_user_id,))
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def all_ig_accounts(self) -> list[tuple[int, str]]:
+        """Все аккаунты пула: [(ig_user_id, username), ...]."""
+        return [(r[0], r[1] or "") for r in self._db.execute(
+            "SELECT ig_user_id, username FROM ig_accounts ORDER BY rowid").fetchall()]
+
+    def free_ig_accounts(self) -> list[tuple[int, str]]:
+        """Аккаунты без привязки к чату (кандидаты для /instagram connect)."""
+        return [(r[0], r[1] or "") for r in self._db.execute(
+            "SELECT ig_user_id, username FROM ig_accounts "
+            "WHERE ig_user_id NOT IN (SELECT ig_user_id FROM ig_bindings) "
+            "ORDER BY rowid").fetchall()]
+
+    def set_ig_last_seen(self, ig_user_id: int, ts: int) -> None:
+        self._db.execute("UPDATE ig_accounts SET last_seen_ts=? WHERE ig_user_id=?",
+                         (int(ts), ig_user_id))
+        self._db.commit()
+
+    def add_ig_binding(self, ig_user_id: int, tg_chat_id: int, title: str = "") -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO ig_bindings(ig_user_id, tg_chat_id, title) "
+            "VALUES (?, ?, ?)", (ig_user_id, tg_chat_id, title))
+        self._db.commit()
+
+    def remove_ig_binding(self, ig_user_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM ig_bindings WHERE ig_user_id=?", (ig_user_id,))
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def ig_accounts_for_tg(self, tg_chat_id: int) -> list[tuple[int, str]]:
+        """Привязанные к TG-чату Instagram-аккаунты: [(ig_user_id, username|title), ...]."""
+        return [(r[0], r[1] or "") for r in self._db.execute(
+            "SELECT ig_user_id, title FROM ig_bindings WHERE tg_chat_id=? ORDER BY rowid",
+            (tg_chat_id,)).fetchall()]
+
+    def ig_tg_chats_for_account(self, ig_user_id: int) -> list[int]:
+        """TG-чаты, куда (и в их VK-беседы) льём сообщения аккаунта."""
+        return [r[0] for r in self._db.execute(
+            "SELECT tg_chat_id FROM ig_bindings WHERE ig_user_id=?",
+            (ig_user_id,)).fetchall()]
+
+    def bound_ig_accounts(self) -> list[tuple[int, str, str, int]]:
+        """Аккаунты, у которых есть привязка (для опроса):
+        [(ig_user_id, username, cookies, last_seen_ts), ...]."""
+        return [(r[0], r[1] or "", r[2] or "", int(r[3] or 0)) for r in self._db.execute(
+            "SELECT a.ig_user_id, a.username, a.cookies, a.last_seen_ts "
+            "FROM ig_accounts a JOIN ig_bindings b ON a.ig_user_id=b.ig_user_id "
+            "GROUP BY a.ig_user_id ORDER BY a.rowid").fetchall()]
 
     # --- участники TG-чатов (для @all) --------------------------------------
 

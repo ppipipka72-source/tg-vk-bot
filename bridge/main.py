@@ -98,6 +98,29 @@ async def run() -> None:
         tasks.append(_run_discord())
         log.info("Discord-наблюдатель подключён")
 
+    # Instagram-наблюдатель: директ личного аккаунта (рилсы + текст) -> в
+    # привязанную пару моста. Управление в TG: /instagram add|connect. Если
+    # instagrapi не установлен, .start() просто предупредит и завершится.
+    from .instagram_bot import InstagramSide
+    instagram_side = InstagramSide(cfg, links)
+    instagram_side.tg_bot = tg.bot
+    instagram_side.vk_api = vk.api
+    instagram_side.vk_token = cfg.vk_token
+    instagram_side.vk_user_token = cfg.vk_user_token
+    instagram_side.vk_group_id = tg.vk_group_id
+    tg.instagram = instagram_side
+
+    async def _run_instagram() -> None:
+        # Падение наблюдателя (плохая cookie, бан) не должно ронять мост.
+        try:
+            await instagram_side.start()
+        except Exception:
+            log.exception("Instagram-наблюдатель остановился — мост работает дальше")
+
+    tasks.append(_run_instagram())
+    if instagram_side.available:
+        log.info("Instagram-наблюдатель подключён")
+
     logging.getLogger(__name__).info("Мост VK <-> Telegram запускается...")
     await asyncio.gather(*tasks)
 

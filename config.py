@@ -67,6 +67,11 @@ class Config:
     webapp_bot_app: str = ""      # короткое имя Mini App из BotFather
     webapp_host: str = "127.0.0.1"  # на каком интерфейсе слушает aiohttp (за Caddy)
     webapp_port: int = 8090       # локальный порт aiohttp (Caddy проксирует на него)
+    # --- Instagram (опционально) ---
+    # Аккаунты добавляются командой /instagram add (см. tg_bot); фича сама
+    # включается, когда в пуле есть привязанный аккаунт. Интервал опроса директа
+    # (webhook'ов для личных аккаунтов нет — только поллинг). Минимум 15 с.
+    instagram_poll_seconds: int = 45
 
 
 def load_config() -> Config:
@@ -91,4 +96,5 @@ def load_config() -> Config:
         webapp_bot_app=os.getenv("WEBAPP_BOT_APP", "").strip(),
         webapp_host=os.getenv("WEBAPP_HOST", "127.0.0.1").strip() or "127.0.0.1",
         webapp_port=int(os.getenv("WEBAPP_PORT") or 8090),
+        instagram_poll_seconds=int(os.getenv("INSTAGRAM_POLL_SECONDS") or 45),
     )

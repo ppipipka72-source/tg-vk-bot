@@ -57,6 +57,7 @@ class TGSide:
         self.vk_api = None  # выставляется в main
         self.vk_group_id = cfg.vk_group_id  # может уточниться автоопределением в main
         self.discord = None  # DiscordSide, выставляется в main (если включён Discord)
+        self.instagram = None  # InstagramSide, выставляется в main
         self.alts = None  # AltService, выставляется в main
         self.webapp = None  # WebAppServer, выставляется в main (если включён /alt web)
 
@@ -69,6 +70,8 @@ class TGSide:
         self.dp.message(Command(commands=["vc"]))(self._cmd_vc)
         self.dp.message(Command(commands=["ds_connect"]))(self._cmd_ds_connect)
         self.dp.message(Command(commands=["ds_disconnect"]))(self._cmd_ds_disconnect)
+        # Instagram: /instagram add|connect|disconnect|list — только владельцы.
+        self.dp.message(Command(commands=["instagram", "ig"]))(self._cmd_instagram)
         # Персональный префикс — доступен всем участникам чата.
         self.dp.message(Command(commands=["prefix"]))(self._cmd_prefix)
         # Альты (сохранённые видео) — доступны всем участникам чата.
@@ -77,6 +80,8 @@ class TGSide:
         self.dp.callback_query(F.data.startswith("link:"))(self._on_link_cb)
         self.dp.callback_query(F.data.startswith("dsc:"))(self._on_ds_connect_cb)
         self.dp.callback_query(F.data.startswith("dsd:"))(self._on_ds_disconnect_cb)
+        self.dp.callback_query(F.data.startswith("igc:"))(self._on_ig_connect_cb)
+        self.dp.callback_query(F.data.startswith("igd:"))(self._on_ig_disconnect_cb)
         self.dp.edited_message()(self._on_edited_message)
         self.dp.message()(self._on_message)
 
@@ -113,6 +118,10 @@ class TGSide:
             "• /ds_connect — привязать Discord-сервер к этому чату\n"
             "• /ds_disconnect — отвязать Discord-сервер\n"
             "• /vc — кто сейчас в голосовых (картинка; доступно всем, в TG и VK)\n"
+            "\n<b>Instagram (директ → чат):</b>\n"
+            "• /instagram add — добавить аккаунт в пул (в личке с ботом)\n"
+            "• /instagram connect — привязать аккаунт к этому чату\n"
+            "• /instagram list — аккаунты и привязки\n"
             "\n<b>Прочее (доступно всем):</b>\n"
             "• <code>@all</code> в сообщении — тегну всех участников чата "
             "(кого видел писавшими). В VK не дублируется.\n"
@@ -280,6 +289,145 @@ class TGSide:
         self.links.remove_ds_binding(guild_id, cb.message.chat.id)
         await cb.message.edit_text("✅ Discord-сервер отвязан от этого чата.")
         await cb.answer("Готово")
+
+    # --- Instagram (/instagram add|connect|disconnect|list) -----------------
+
+    async def _cmd_instagram(self, message: Message, command: CommandObject) -> None:
+        if not self._is_admin(message.from_user.id if message.from_user else None):
+            return
+        sub, _, rest = (command.args or "").strip().partition(" ")
+        sub = sub.lower()
+        if sub == "add":
+            await self._ig_add(message, rest.strip())
+        elif sub == "connect":
+            await self._ig_connect(message)
+        elif sub == "disconnect":
+            await self._ig_disconnect(message)
+        elif sub in ("list", "accounts", "status"):
+            await self._ig_list(message)
+        else:
+            await message.reply(
+                "<b>Instagram → чат</b> (рилсы + сообщения из директа):\n"
+                "• <code>/instagram add</code> — добавить аккаунт в пул "
+                "(<b>в личке с ботом</b>: пришли cookie-JSON/ sessionid или файл)\n"
+                "• <code>/instagram connect</code> — привязать свободный аккаунт к "
+                "<b>этому</b> чату (и его VK-беседе)\n"
+                "• <code>/instagram disconnect</code> — отвязать аккаунт\n"
+                "• <code>/instagram list</code> — аккаунты и их привязки",
+                parse_mode="HTML")
+
+    async def _ig_add(self, message: Message, rest: str) -> None:
+        if message.chat.type != "private":
+            await message.reply("Добавляй аккаунт в личке с ботом — cookie не должны "
+                                "попасть в общий чат.")
+            return
+        blob = rest
+        reply = message.reply_to_message
+        if not blob and reply:
+            blob = (reply.text or reply.caption or "").strip()
+        doc = message.document or (reply.document if reply else None)
+        if not blob and doc:
+            try:
+                f = await self.bot.get_file(doc.file_id)
+                buf = await self.bot.download_file(f.file_path)
+                blob = buf.read().decode("utf-8", "ignore").strip()
+            except Exception:  # noqa: BLE001
+                log.exception("ig add: не удалось скачать файл cookie")
+        if not blob:
+            await message.reply(
+                "Пришли cookie одним из способов:\n"
+                "• <code>/instagram add &lt;JSON-массив куки или sessionid&gt;</code>\n"
+                "• ответь этой командой на сообщение с cookie\n"
+                "• приложи файл cookie с подписью <code>/instagram add</code>",
+                parse_mode="HTML")
+            return
+        status = await message.reply("🔐 Проверяю вход в Instagram…")
+        from .instagram_bot import probe_account
+        try:
+            ig_user_id, username, cookies_json = await probe_account(blob)
+        except Exception as exc:  # noqa: BLE001 — показываем причину владельцу
+            await status.edit_text(f"❌ Не удалось войти: {html.escape(str(exc))[:300]}")
+            return
+        self.links.add_ig_account(ig_user_id, username, cookies_json)
+        if self.instagram is not None:
+            self.instagram.drop_client(ig_user_id)
+        await status.edit_text(
+            f"✅ Аккаунт @{html.escape(username)} добавлен в пул.\n"
+            f"Теперь в нужной группе набери <code>/instagram connect</code>.",
+            parse_mode="HTML")
+
+    async def _ig_connect(self, message: Message) -> None:
+        if message.chat.type not in _GROUP_TYPES:
+            await message.reply("Эту команду пиши в групповом чате, куда лить директ "
+                                "из инсты.")
+            return
+        free = self.links.free_ig_accounts()
+        if not free:
+            await message.reply("Нет свободных аккаунтов. Добавь: "
+                                "/instagram add (в личке с ботом).")
+            return
+        rows = [[InlineKeyboardButton(text=f"@{u or uid}"[:60], callback_data=f"igc:{uid}")]
+                for uid, u in free[:20]]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await message.reply(
+            "Выбери Instagram-аккаунт, чей директ (рилсы + сообщения) лить в "
+            "<b>этот</b> чат и его VK-беседу:", reply_markup=kb, parse_mode="HTML")
+
+    async def _on_ig_connect_cb(self, cb: CallbackQuery) -> None:
+        if not self._is_admin(cb.from_user.id if cb.from_user else None):
+            await cb.answer("Только для владельца бота.", show_alert=True)
+            return
+        try:
+            uid = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Некорректные данные.", show_alert=True)
+            return
+        uname = dict(self.links.all_ig_accounts()).get(uid) or str(uid)
+        self.links.add_ig_binding(uid, cb.message.chat.id, uname)
+        log.info("IG-привязка: @%s (%s) -> TG %s", uname, uid, cb.message.chat.id)
+        await cb.message.edit_text(
+            f"✅ @{uname}: директ идёт в этот чат и в VK. "
+            f"Рилсы — видео, сообщения — текстом.")
+        await cb.answer("Готово")
+
+    async def _ig_disconnect(self, message: Message) -> None:
+        if not self._is_admin(message.from_user.id if message.from_user else None):
+            return
+        bound = self.links.ig_accounts_for_tg(message.chat.id)
+        if not bound:
+            await message.reply("К этому чату не привязан ни один Instagram-аккаунт.")
+            return
+        rows = [[InlineKeyboardButton(text=f"@{u or uid}"[:60], callback_data=f"igd:{uid}")]
+                for uid, u in bound]
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await message.reply("Выбери Instagram-аккаунт для отвязки от этого чата:",
+                            reply_markup=kb)
+
+    async def _on_ig_disconnect_cb(self, cb: CallbackQuery) -> None:
+        if not self._is_admin(cb.from_user.id if cb.from_user else None):
+            await cb.answer("Только для владельца бота.", show_alert=True)
+            return
+        try:
+            uid = int(cb.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            await cb.answer("Некорректные данные.", show_alert=True)
+            return
+        self.links.remove_ig_binding(uid)
+        await cb.message.edit_text("✅ Instagram-аккаунт отвязан от этого чата.")
+        await cb.answer("Готово")
+
+    async def _ig_list(self, message: Message) -> None:
+        accs = self.links.all_ig_accounts()
+        if not accs:
+            await message.reply("Пул Instagram пуст. Добавь: "
+                                "/instagram add (в личке с ботом).")
+            return
+        lines = ["<b>Instagram-аккаунты:</b>"]
+        for uid, u in accs:
+            chats = self.links.ig_tg_chats_for_account(uid)
+            where = f"привязан ({len(chats)})" if chats else "свободен"
+            lines.append(f"• @{html.escape(u or str(uid))} — {where}")
+        await message.reply("\n".join(lines), parse_mode="HTML")
 
     # --- персональный префикс (/prefix) -------------------------------------
 
