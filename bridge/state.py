@@ -59,6 +59,13 @@ class LinkStore:
             "CREATE TABLE IF NOT EXISTS ig_bindings ("
             "ig_user_id INTEGER PRIMARY KEY, tg_chat_id INTEGER, title TEXT)"
         )
+        # Уже показанные в TG-чате запросы на переписку.  Иначе один и тот же
+        # pending-тред приходил бы с кнопкой каждые 15 секунд.
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS ig_pending_notifications ("
+            "ig_user_id INTEGER, thread_id TEXT, tg_chat_id INTEGER, notified_at INTEGER, "
+            "PRIMARY KEY (ig_user_id, thread_id, tg_chat_id))"
+        )
         # Участники TG-чатов (для @all): Bot API не умеет перечислять всех
         # участников, поэтому копим тех, кто писал в чат.
         self._db.execute(
@@ -300,6 +307,28 @@ class LinkStore:
         return [r[0] for r in self._db.execute(
             "SELECT tg_chat_id FROM ig_bindings WHERE ig_user_id=?",
             (ig_user_id,)).fetchall()]
+
+    def ig_pending_notified(self, ig_user_id: int, thread_id: str, tg_chat_id: int) -> bool:
+        return self._db.execute(
+            "SELECT 1 FROM ig_pending_notifications "
+            "WHERE ig_user_id=? AND thread_id=? AND tg_chat_id=?",
+            (ig_user_id, str(thread_id), tg_chat_id),
+        ).fetchone() is not None
+
+    def mark_ig_pending_notified(self, ig_user_id: int, thread_id: str, tg_chat_id: int) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO ig_pending_notifications(ig_user_id, thread_id, tg_chat_id, notified_at) "
+            "VALUES (?, ?, ?, ?)",
+            (ig_user_id, str(thread_id), tg_chat_id, int(time.time())),
+        )
+        self._db.commit()
+
+    def clear_ig_pending_notification(self, ig_user_id: int, thread_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM ig_pending_notifications WHERE ig_user_id=? AND thread_id=?",
+            (ig_user_id, str(thread_id)),
+        )
+        self._db.commit()
 
     def bound_ig_accounts(self) -> list[tuple[int, str, str, int]]:
         """Аккаунты, у которых есть привязка (для опроса):

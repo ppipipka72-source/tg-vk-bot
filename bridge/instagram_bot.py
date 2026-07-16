@@ -16,11 +16,12 @@ instagrapi синхронный → все его вызовы уносим в �
 """
 
 import asyncio
+import html
 import json
 import logging
 import random
 
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .discord_relay import deliver_text
 from .video_dl import download_video, find_video_url
@@ -95,7 +96,7 @@ class InstagramSide:
     def __init__(self, cfg, links) -> None:
         self.cfg = cfg
         self.links = links
-        self.poll = max(15, int(getattr(cfg, "instagram_poll_seconds", 45) or 45))
+        self.poll = max(15, int(getattr(cfg, "instagram_poll_seconds", 15) or 15))
         # Ссылки на мост (выставляются в main):
         self.tg_bot = None
         self.vk_api = None
@@ -149,7 +150,11 @@ class InstagramSide:
         first_run = last_seen == 0
         new_max = last_seen
         items: list[tuple[int, object, str]] = []
-        for th in threads:
+        for th, is_pending in threads:
+            if is_pending:
+                for tg_chat_id in chats:
+                    await self._notify_pending(tg_chat_id, ig_user_id, username, th)
+                continue
             umap = {str(u.pk): (u.username or "instagram") for u in (th.users or [])}
             for msg in (th.messages or []):
                 ts = self._ts(msg)
@@ -203,23 +208,92 @@ class InstagramSide:
         return cl
 
     @staticmethod
-    def _fetch_threads(cl) -> list:
-        out: list = []
+    def _fetch_threads(cl) -> list[tuple[object, bool]]:
+        out: list[tuple[object, bool]] = []
         try:
-            out.extend(cl.direct_threads(amount=15, selected_filter="") or [])
+            out.extend((thread, False) for thread in (cl.direct_threads(amount=15, selected_filter="") or []))
         except Exception:  # noqa: BLE001
             log.exception("Instagram: не удалось получить директ-треды")
             raise  # наверх → сброс клиента и перелогин
         try:
-            out.extend(cl.direct_pending_inbox(amount=10) or [])
+            out.extend((thread, True) for thread in (cl.direct_pending_inbox(amount=10) or []))
         except TypeError:
             try:
-                out.extend(cl.direct_pending_inbox() or [])
+                out.extend((thread, True) for thread in (cl.direct_pending_inbox() or []))
             except Exception:  # noqa: BLE001 — pending-инбокс необязателен
                 pass
         except Exception:  # noqa: BLE001
             pass
         return out
+
+    async def _notify_pending(self, tg_chat_id: int, ig_user_id: int, account: str, thread) -> None:
+        """Показать запрос на переписку один раз в привязанном TG-чате."""
+        thread_id = str(getattr(thread, "id", None) or getattr(thread, "thread_id", ""))
+        if not thread_id:
+            log.warning("Instagram: pending-тред без id для @%s", account)
+            return
+        if self.links.ig_pending_notified(ig_user_id, thread_id, tg_chat_id):
+            return
+
+        users = list(getattr(thread, "users", None) or [])
+        sender = users[0] if users else None
+        username = str(getattr(sender, "username", "") or "")
+        full_name = str(getattr(sender, "full_name", "") or "")
+        profile_url = str(getattr(sender, "profile_pic_url", "") or "")
+        label = full_name or (f"@{username}" if username else "Неизвестный пользователь")
+        lines = [
+            "<b>Новый запрос в Instagram</b>",
+            f"Аккаунт: <a href=\"https://www.instagram.com/{html.escape(account)}/\">@{html.escape(account)}</a>",
+            f"Отправитель: <b>{html.escape(label)}</b>",
+        ]
+        if username:
+            lines.append(f"Профиль: <a href=\"https://www.instagram.com/{html.escape(username)}/\">@{html.escape(username)}</a>")
+        caption = "\n".join(lines)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Принять запрос", callback_data=f"igpa:{ig_user_id}:{thread_id}")
+        ]])
+        try:
+            if profile_url:
+                await self.tg_bot.send_photo(tg_chat_id, profile_url, caption=caption,
+                                             parse_mode="HTML", reply_markup=keyboard)
+            else:
+                await self.tg_bot.send_message(tg_chat_id, caption, parse_mode="HTML",
+                                               reply_markup=keyboard)
+        except Exception:  # noqa: BLE001
+            log.exception("Instagram: не удалось показать pending-запрос в %s", tg_chat_id)
+            return
+        self.links.mark_ig_pending_notified(ig_user_id, thread_id, tg_chat_id)
+
+    async def approve_pending(self, tg_chat_id: int, ig_user_id: int, thread_id: str) -> None:
+        """Принять запрос, только если кнопка находится в привязанном чате."""
+        if tg_chat_id not in self.links.ig_tg_chats_for_account(ig_user_id):
+            raise PermissionError("Этот Instagram-аккаунт не привязан к данному чату.")
+        account = next((row for row in self.links.bound_ig_accounts() if row[0] == ig_user_id), None)
+        if account is None:
+            raise ValueError("Instagram-аккаунт больше не подключён.")
+        client = await self._client(ig_user_id, account[2])
+        if client is None:
+            raise RuntimeError("Не удалось войти в Instagram.")
+        approved = await asyncio.to_thread(client.direct_pending_approve, int(thread_id))
+        if not approved:
+            raise RuntimeError("Instagram не подтвердил принятие запроса.")
+        self.links.clear_ig_pending_notification(ig_user_id, thread_id)
+        # Первый рилс нередко и есть сообщение-запрос.  Отправляем его сразу,
+        # иначе общий курсор опроса может посчитать его уже старой историей.
+        try:
+            thread = await asyncio.to_thread(client.direct_thread, int(thread_id), 20)
+            users = {str(user.pk): (user.username or account[1]) for user in (thread.users or [])}
+            newest = int(account[3] or 0)
+            messages = sorted(thread.messages or [], key=self._ts)
+            for msg in messages:
+                if getattr(msg, "is_sent_by_viewer", False):
+                    continue
+                await self._forward(tg_chat_id, msg, users.get(str(getattr(msg, "user_id", ""))) or account[1])
+                newest = max(newest, self._ts(msg))
+            if newest > int(account[3] or 0):
+                self.links.set_ig_last_seen(ig_user_id, newest)
+        except Exception:  # noqa: BLE001 — запрос уже принят, доставка повторится при опросе
+            log.exception("Instagram: не удалось сразу переслать принятый запрос %s", thread_id)
 
     @staticmethod
     def _ts(msg) -> int:

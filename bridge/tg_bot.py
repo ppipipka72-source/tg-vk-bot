@@ -16,6 +16,7 @@ from aiogram.types import (
 
 from config import Config
 from .alts import ALT_HELP
+from .discord_relay import deliver_text
 from .media import (
     edit_vk_from_tg,
     relay_link_video,
@@ -82,6 +83,7 @@ class TGSide:
         self.dp.callback_query(F.data.startswith("dsd:"))(self._on_ds_disconnect_cb)
         self.dp.callback_query(F.data.startswith("igc:"))(self._on_ig_connect_cb)
         self.dp.callback_query(F.data.startswith("igd:"))(self._on_ig_disconnect_cb)
+        self.dp.callback_query(F.data.startswith("igpa:"))(self._on_ig_pending_approve_cb)
         self.dp.edited_message()(self._on_edited_message)
         self.dp.message()(self._on_message)
 
@@ -388,6 +390,13 @@ class TGSide:
         await cb.message.edit_text(
             f"✅ @{uname}: директ идёт в этот чат и в VK. "
             f"Рилсы — видео, сообщения — текстом.")
+        try:
+            await deliver_text(
+                self.bot, self.vk_api, self.cfg.vk_token, self.links, cb.message.chat.id,
+                f"Instagram для этого чата: https://www.instagram.com/{uname}/",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("IG-привязка: не удалось отправить ссылку на @%s", uname)
         await cb.answer("Готово")
 
     async def _ig_disconnect(self, message: Message) -> None:
@@ -415,6 +424,32 @@ class TGSide:
         self.links.remove_ig_binding(uid)
         await cb.message.edit_text("✅ Instagram-аккаунт отвязан от этого чата.")
         await cb.answer("Готово")
+
+    async def _on_ig_pending_approve_cb(self, cb: CallbackQuery) -> None:
+        """Кнопка доступна любому участнику именно того чата, куда пришёл запрос."""
+        if self.instagram is None or cb.message is None:
+            await cb.answer("Instagram сейчас недоступен.", show_alert=True)
+            return
+        try:
+            _, uid, thread_id = cb.data.split(":", 2)
+            await self.instagram.approve_pending(cb.message.chat.id, int(uid), thread_id)
+        except (ValueError, PermissionError) as exc:
+            await cb.answer(str(exc), show_alert=True)
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("ig pending approve: не удалось принять запрос")
+            await cb.answer("Не получилось принять запрос. Попробуйте ещё раз.", show_alert=True)
+            return
+        try:
+            if cb.message.photo:
+                await cb.message.edit_caption(caption="✅ Запрос принят. Новые сообщения будут пересылаться сюда.",
+                                              reply_markup=None)
+            else:
+                await cb.message.edit_text("✅ Запрос принят. Новые сообщения будут пересылаться сюда.",
+                                           reply_markup=None)
+        except Exception:  # noqa: BLE001
+            log.exception("ig pending approve: не удалось обновить карточку")
+        await cb.answer("Запрос принят")
 
     async def _ig_list(self, message: Message) -> None:
         accs = self.links.all_ig_accounts()
