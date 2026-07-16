@@ -254,8 +254,13 @@ class InstagramSide:
         ]])
         try:
             if profile_url:
-                await self.tg_bot.send_photo(tg_chat_id, profile_url, caption=caption,
-                                             parse_mode="HTML", reply_markup=keyboard)
+                try:
+                    await self.tg_bot.send_photo(tg_chat_id, profile_url, caption=caption,
+                                                 parse_mode="HTML", reply_markup=keyboard)
+                except Exception:  # noqa: BLE001 — сама карточка важнее аватарки
+                    log.warning("Instagram: не удалось отправить аватар pending-запроса")
+                    await self.tg_bot.send_message(tg_chat_id, caption, parse_mode="HTML",
+                                                   reply_markup=keyboard)
             else:
                 await self.tg_bot.send_message(tg_chat_id, caption, parse_mode="HTML",
                                                reply_markup=keyboard)
